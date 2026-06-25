@@ -24,12 +24,12 @@ PY="${PY:-python}"
 
 # Pruning hyper-params
 TARGET_SPARSITY="${TARGET_SPARSITY:-0.5}"
-PRUNE_ITERS="${PRUNE_ITERS:-7}"
-FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-6}"
+PRUNE_ITERS="${PRUNE_ITERS:-2}"
+FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-3}"
 SCOPE="${SCOPE:-all}"                   # all | backbone | neck (component-aware)
 
-DENSE_EPOCHS="${DENSE_EPOCHS:-60}"
-FINAL_EPOCHS="${FINAL_EPOCHS:-60}"
+DENSE_EPOCHS="${DENSE_EPOCHS:-5}"
+FINAL_EPOCHS="${FINAL_EPOCHS:-5}"
 
 WANDB="${WANDB:-0}"                     # WANDB=1 de bat log wandb (env key da set san tren FPT)
 WANDB_ARG=""; [ "$WANDB" = "1" ] && WANDB_ARG="--wandb"
