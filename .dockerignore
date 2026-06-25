@@ -1,0 +1,10 @@
+# Đừng copy vào image: nặng / không cần / không nên bake
+PrunedFishNet/
+YOLOv1/
+NewDeepfish/
+NewEtroplusMaculatus/
+output/
+.git/
+**/__pycache__/
+*.pth
+*.pt
