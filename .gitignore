@@ -70,8 +70,3 @@ Thumbs.db
 *.log
 *.tmp
 *.bak
-
-# ============================================
-# Ke hoach cu (huong RetinaNet) - da bo, khong track/push nua
-# ============================================
-RETINANET_PRUNE_PLAN.md
