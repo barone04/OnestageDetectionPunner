@@ -10,6 +10,9 @@
 # ===========================================================================
 set -e
 
+# tu nap .env neu co (vd: WANDB_API_KEY=..., WANDB_PROJECT=..., WANDB_ENTITY=...)
+set -a; [ -f .env ] && . ./.env; set +a
+
 # --------------------- CONFIG (deu env-overridable) ------------------------
 DATA="${DATA:-./NewDeepfish}"
 BACKBONE="${BACKBONE:-resnet18}"       # resnet18/34/50/101, vgg16/19
