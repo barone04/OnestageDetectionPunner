@@ -108,6 +108,10 @@ def evaluate_map(model, loader, device, num_classes,
             aps.append(_voc_ap(recall, precision))
         map_per_iou[t] = sum(aps) / len(aps) if aps else 0.0
 
-    map50 = map_per_iou.get(0.5, 0.0)
     map5095 = sum(map_per_iou.values()) / len(map_per_iou) if map_per_iou else 0.0
-    return {"mAP@0.5": map50, "mAP@0.5:0.95": map5095}
+    return {
+        "mAP@0.5": map_per_iou.get(0.5, 0.0),
+        "mAP@0.75": map_per_iou.get(0.75, 0.0),
+        "mAP@0.9": map_per_iou.get(0.9, 0.0),
+        "mAP@0.5:0.95": map5095,
+    }
