@@ -109,6 +109,9 @@ def main():
 
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr,
                                 momentum=args.momentum, weight_decay=args.weight_decay)
+    # warm-restart: lr reset dau moi vong prune (T_0 = so epoch finetune/vong) ~ giong TP iterative
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=max(args.finetune_epochs, 1))
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
 
     nc = cfg["num_classes"]
@@ -135,6 +138,7 @@ def main():
         for ep in range(args.finetune_epochs):
             train_one_epoch(model, criterion, train_loader, optimizer, device, ep,
                             args.finetune_epochs, pruner=u_pruner, scaler=scaler)
+            scheduler.step()
         evaluate(model, criterion, val_loader, device)
 
     # --- surgery -> lean model ---
