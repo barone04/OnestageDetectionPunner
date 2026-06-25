@@ -63,10 +63,19 @@ Thumbs.db
 *.avi
 *.mov
 *.wav
-
+*.jpg
+*.txt
 # ============================================
 # Shell script outputs
 # ============================================
 *.log
 *.tmp
 *.bak
+
+# ============================================
+# Ke hoach cu (huong RetinaNet) - da bo, khong track/push nua
+# ============================================
+RETINANET_PRUNE_PLAN.md
+# Ghi chu tien do ca nhan - khong push len remote
+PROGRESS.md
+NewDeepfish/
