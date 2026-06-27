@@ -36,6 +36,9 @@ FINAL_EPOCHS="${FINAL_EPOCHS:-80}"
 
 WANDB="${WANDB:-0}"                     # WANDB=1 de bat log wandb (env key da set san tren FPT)
 WANDB_ARG=""; [ "$WANDB" = "1" ] && WANDB_ARG="--wandb"
+
+PRETRAINED="${PRETRAINED:-1}"           # PRETRAINED=1 -> Step1 dung ImageNet backbone (mac dinh bat)
+PRET_ARG=""; [ "$PRETRAINED" = "1" ] && PRET_ARG="--pretrained-backbone"
 # ---------------------------------------------------------------------------
 
 echo "=============================================================="
@@ -45,7 +48,7 @@ echo "=============================================================="
 echo "[Step 1/4] Train DENSE ..."
 $PY train.py --data-path $DATA --backbone $BACKBONE --num-classes $NUM_CLASSES \
     --input-size $INPUT --epochs $DENSE_EPOCHS --batch-size $BATCH --workers $WORKERS \
-    --device $DEVICE --augment $WANDB_ARG --output-dir $OUT/step1_dense
+    --device $DEVICE --augment $WANDB_ARG $PRET_ARG --output-dir $OUT/step1_dense
 
 echo "[Step 2/4] Bi-level prune (Song Han + Filter) + surgery ..."
 $PY prune.py --data-path $DATA --checkpoint $OUT/step1_dense/model_best.pth \

@@ -9,6 +9,7 @@ Backbone prunable (standalone) cho YOLOv1: ResNet18/34/50/101 + VGG16/19.
     * ResNet: block_mids = list theo tung block; entry int (BasicBlock) hoac (mid1,mid2) (BottleNeck).
     * VGG:    widths = list so kenh moi conv.
 """
+import torch
 import torch.nn as nn
 
 from .element import PrunableConv
@@ -198,20 +199,131 @@ class VGG(nn.Module):
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
-def build_backbone(arch_name="resnet18", backbone_cfg=None):
+def build_backbone(arch_name="resnet18", backbone_cfg=None, pretrained=False):
     """
     backbone_cfg:
       - ResNet: block_mids (list theo block) hoac None (dense).
       - VGG: widths (list theo conv) hoac None (dense).
+    pretrained: nap ImageNet weights (CHI khi dense, backbone_cfg=None).
     Tra ve (backbone, feat_dims).
     """
     arch_name = arch_name.lower()
     if arch_name in RESNET_CFG:
         feat_dims = RESNET_CFG[arch_name][2]
         model = ResNet(arch_name, block_mids=backbone_cfg)
+        if pretrained and backbone_cfg is None:
+            load_imagenet_pretrained(model, arch_name)
         return model, feat_dims
     if arch_name in VGG_CFG:
         model = VGG(arch_name, widths=backbone_cfg)
+        if pretrained and backbone_cfg is None:
+            load_imagenet_pretrained(model, arch_name)
         return model, model.out_channels
     raise ValueError(f"Unsupported backbone: {arch_name}. "
                      f"Choose from {list(RESNET_CFG) + list(VGG_CFG)}")
+
+
+# ---------------------------------------------------------------------------
+# ImageNet-pretrained loading: remap theo TEN (resnet) / thu tu conv (vgg)
+# ---------------------------------------------------------------------------
+_TV_PRETRAINED = {
+    "resnet18":  ("resnet18",  "ResNet18_Weights"),
+    "resnet34":  ("resnet34",  "ResNet34_Weights"),
+    "resnet50":  ("resnet50",  "ResNet50_Weights"),
+    "resnet101": ("resnet101", "ResNet101_Weights"),
+    "vgg16":     ("vgg16_bn",  "VGG16_BN_Weights"),   # HybridVGG co BN -> dung ban _bn
+    "vgg19":     ("vgg19_bn",  "VGG19_BN_Weights"),
+}
+
+
+def _build_tv(arch):
+    import torchvision
+    fn_name, w_name = _TV_PRETRAINED[arch]
+    weights = getattr(torchvision.models, w_name).DEFAULT
+    return getattr(torchvision.models, fn_name)(weights=weights).eval()
+
+
+def _remap_resnet_key(k):
+    """tv key -> my key (PrunableConv boc conv+bn). None = bo qua (fc...)."""
+    if k.startswith("conv1."):
+        return "conv1.conv." + k[len("conv1."):]
+    if k.startswith("bn1."):
+        return "conv1.bn." + k[len("bn1."):]
+    if k.startswith("layer"):
+        for n in (1, 2, 3):
+            if f".conv{n}." in k:
+                return k.replace(f".conv{n}.", f".conv{n}.conv.")
+            if f".bn{n}." in k:
+                return k.replace(f".bn{n}.", f".conv{n}.bn.")
+        if ".downsample.0." in k:
+            return k.replace(".downsample.0.", ".downsample.conv.")
+        if ".downsample.1." in k:
+            return k.replace(".downsample.1.", ".downsample.bn.")
+    return None
+
+
+@torch.no_grad()
+def _verify_backbone(model, tv, arch, input_size=224, atol=1e-3):
+    model.eval()
+    x = torch.randn(1, 3, input_size, input_size)
+    my_out = model(x)
+    if arch.startswith("resnet"):
+        t = tv.maxpool(tv.relu(tv.bn1(tv.conv1(x))))
+        t = tv.layer4(tv.layer3(tv.layer2(tv.layer1(t))))
+        tv_out = t
+    else:
+        tv_out = tv.features(x)
+    diff = (my_out - tv_out).abs().max().item()
+    return torch.allclose(my_out, tv_out, atol=atol), diff
+
+
+@torch.no_grad()
+def load_imagenet_pretrained(model, arch, verify=True, verbose=True):
+    arch = arch.lower()
+    if arch not in _TV_PRETRAINED:
+        raise ValueError(f"No pretrained mapping for {arch}")
+    tv = _build_tv(arch)
+    my_sd = model.state_dict()
+
+    if arch.startswith("resnet"):
+        new = {}
+        for k, v in tv.state_dict().items():
+            nk = _remap_resnet_key(k)
+            if nk is None or nk not in my_sd:
+                continue
+            if my_sd[nk].shape != v.shape:
+                raise RuntimeError(f"[pretrained] shape mismatch {k}->{nk}: "
+                                   f"{tuple(v.shape)} vs {tuple(my_sd[nk].shape)}")
+            new[nk] = v
+        model.load_state_dict(new, strict=False)
+        n_loaded = len(new)
+    else:  # vgg (theo thu tu conv — chuoi tuyen tinh nen khong nhap nhang)
+        tv_convs = [m for m in tv.features if isinstance(m, nn.Conv2d)]
+        tv_bns = [m for m in tv.features if isinstance(m, nn.BatchNorm2d)]
+        my_pc = [m for m in model.features if isinstance(m, PrunableConv)]
+        if not (len(my_pc) == len(tv_convs) == len(tv_bns)):
+            raise RuntimeError(f"[pretrained] VGG count mismatch: mine={len(my_pc)} "
+                               f"tv_conv={len(tv_convs)} tv_bn={len(tv_bns)}")
+        n_loaded = 0
+        for pc, cv, bn in zip(my_pc, tv_convs, tv_bns):
+            if pc.conv.weight.shape != cv.weight.shape:
+                raise RuntimeError(f"[pretrained] VGG shape mismatch "
+                                   f"{tuple(pc.conv.weight.shape)} vs {tuple(cv.weight.shape)}")
+            pc.conv.weight.data.copy_(cv.weight.data)
+            pc.bn.weight.data.copy_(bn.weight.data)
+            pc.bn.bias.data.copy_(bn.bias.data)
+            pc.bn.running_mean.data.copy_(bn.running_mean.data)
+            pc.bn.running_var.data.copy_(bn.running_var.data)
+            n_loaded += 1
+
+    if verify:
+        ok, diff = _verify_backbone(model, tv, arch)
+        if not ok:
+            raise RuntimeError(f"[pretrained] FORWARD MISMATCH (max diff={diff:.2e}) "
+                               f"-> remap SAI, dung lai!")
+        if verbose:
+            print(f"[pretrained] {arch}: loaded {n_loaded} tensors, "
+                  f"forward-verify OK (max diff={diff:.2e})")
+    elif verbose:
+        print(f"[pretrained] {arch}: loaded {n_loaded} tensors (no verify)")
+    return model

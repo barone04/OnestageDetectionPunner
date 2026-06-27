@@ -52,6 +52,8 @@ def get_args():
     p.add_argument("--workers", default=4, type=int)
     p.add_argument("--device", default="auto")
     p.add_argument("--augment", action="store_true")
+    p.add_argument("--pretrained-backbone", action="store_true",
+                   help="nap ImageNet pretrained backbone (chi cho Step1 dense)")
     p.add_argument("--output-dir", default="./output/yolo_dense")
     p.add_argument("--resume", default="", help="resume full training state")
     # finetune LEAN (step 3)
@@ -109,7 +111,8 @@ def main():
         print(f"[Step 3] Lean model from {args.init_config}")
     else:
         model = YoloModel(input_size=args.input_size, backbone=args.backbone,
-                          num_classes=args.num_classes, neck_out=args.neck_out).to(device)
+                          num_classes=args.num_classes, neck_out=args.neck_out,
+                          pretrained_backbone=args.pretrained_backbone).to(device)
 
     if args.weights and os.path.isfile(args.weights):
         wck = torch.load(args.weights, map_location="cpu", weights_only=False)

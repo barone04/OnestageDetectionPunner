@@ -26,7 +26,8 @@ def set_grid(grid_size):
 
 class YoloModel(nn.Module):
     def __init__(self, input_size=448, backbone="resnet18", num_classes=20,
-                 neck_out=512, backbone_cfg=None, neck_widths=None):
+                 neck_out=512, backbone_cfg=None, neck_widths=None,
+                 pretrained_backbone=False):
         super().__init__()
         self.stride = 32
         self.input_size = input_size
@@ -37,7 +38,8 @@ class YoloModel(nn.Module):
         self._backbone_cfg = backbone_cfg
         self._neck_widths = neck_widths
 
-        self.backbone, feat_dims = build_backbone(backbone, backbone_cfg=backbone_cfg)
+        self.backbone, feat_dims = build_backbone(backbone, backbone_cfg=backbone_cfg,
+                                                  pretrained=pretrained_backbone)
         self.neck = ConvBlock(in_channels=feat_dims, out_channels=neck_out, widths=neck_widths)
         self.head = YoloHead(in_channels=self.neck.out_channels, num_classes=num_classes)
 
