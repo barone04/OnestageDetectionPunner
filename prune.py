@@ -128,7 +128,8 @@ def main():
         from pruning.coring import CoringPruner
         cur, prev = model, 0.0
         for it in range(args.prune_iters):
-            target_abs = args.target_sparsity * (it + 1) / args.prune_iters   # sparsity tuyet doi/goc
+            # ramp CORING theo code goc (get_cpr): cpr[shot] = r/(K-shot) -> phi tuyen, don ve cuoi
+            target_abs = args.target_sparsity / (args.prune_iters - it)        # sparsity tuyet doi/goc
             ratio = (target_abs - prev) / (1.0 - prev) if prev < 1.0 else 0.0  # ty le tren model HIEN TAI
             print(f"\n=== CORING shot {it+1}/{args.prune_iters} | "
                   f"target={target_abs:.3f} | ratio_on_cur={ratio:.3f} ===")
