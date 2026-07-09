@@ -17,6 +17,7 @@ Vi du:
       --scope all --output-dir ./output/yolo/step2_pruned
 """
 import os
+import json
 import argparse
 
 import torch
@@ -62,6 +63,10 @@ def get_args():
     p.add_argument("--finetune-epochs", default=3, type=int)
     p.add_argument("--sensitivity-mult", default=2.0, type=float)
     p.add_argument("--scope", default="all", choices=["all", "backbone", "neck"])
+    # --- chon thuat toan pruning (bai minh vs baseline) ---
+    p.add_argument("--method", default="bilevel", choices=["bilevel", "coring"],
+                   help="bilevel = bai minh (Song Han + L1-inf-inf, mask); "
+                        "coring = baseline (HOSVD+VBD+min_sum, k-shot surgery-first)")
     p.add_argument("--batch-size", default=16, type=int)
     p.add_argument("--lr", default=5e-4, type=float)
     p.add_argument("--momentum", default=0.9, type=float)
@@ -104,16 +109,7 @@ def main():
 
     criterion = YoloLoss(grid_size=model.grid_size, num_classes=cfg["num_classes"])
     scope = Scope(model, args.scope)
-    u_pruner = UnstructuredPruner(scope)
-    s_pruner = StructuredPruner(scope)
-
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr,
-                                momentum=args.momentum, weight_decay=args.weight_decay)
-    # warm-restart: lr reset dau moi vong prune (T_0 = so epoch finetune/vong) ~ giong TP iterative
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=max(args.finetune_epochs, 1))
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
-
     nc = cfg["num_classes"]
 
     def report_map(tag, mdl):
@@ -123,31 +119,70 @@ def main():
         print(f"  [{tag}] mAP@0.5={m['mAP@0.5']:.4f}  mAP@0.5:0.95={m['mAP@0.5:0.95']:.4f}")
 
     p0 = sum(p.numel() for p in model.parameters())
-    print(f"\nBaseline params={p0/1e6:.2f}M | scope={args.scope}")
+    print(f"\nMethod={args.method} | Baseline params={p0/1e6:.2f}M | scope={args.scope}")
     evaluate(model, criterion, val_loader, device)
     report_map("baseline", model)
 
-    # --- vong bi-level pruning ---
-    for it in range(args.prune_iters):
-        sparsity = args.target_sparsity * (it + 1) / args.prune_iters
-        print(f"\n=== Prune iter {it+1}/{args.prune_iters} | sparsity={sparsity:.3f} ===")
-        u_pruner.prune(sensitivity=args.sensitivity_mult * sparsity)
-        s_pruner.prune(prune_ratio=sparsity)
-        print(f"  Song Han global sparsity={u_pruner.global_sparsity():.3f}")
+    if args.method == "coring":
+        # ===== CORING baseline: k-shot, cat -> SURGERY NGAY -> finetune model nho =====
+        from pruning.coring import CoringPruner
+        cur, prev = model, 0.0
+        for it in range(args.prune_iters):
+            target_abs = args.target_sparsity * (it + 1) / args.prune_iters   # sparsity tuyet doi/goc
+            ratio = (target_abs - prev) / (1.0 - prev) if prev < 1.0 else 0.0  # ty le tren model HIEN TAI
+            print(f"\n=== CORING shot {it+1}/{args.prune_iters} | "
+                  f"target={target_abs:.3f} | ratio_on_cur={ratio:.3f} ===")
+            CoringPruner(Scope(cur, args.scope)).prune(prune_ratio=ratio)
+            cur, _ = convert_to_lean(cur)          # surgery ngay -> model nho hon
+            cur.to(device)
+            # calibrate finetune tren model nho (cung budget finetune_epochs/shot nhu bi-level)
+            opt = torch.optim.SGD(cur.parameters(), lr=args.lr,
+                                  momentum=args.momentum, weight_decay=args.weight_decay)
+            sch = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                opt, T_0=max(args.finetune_epochs, 1))
+            crit = YoloLoss(grid_size=cur.grid_size, num_classes=nc)
+            for ep in range(args.finetune_epochs):
+                train_one_epoch(cur, crit, train_loader, opt, device, ep,
+                                args.finetune_epochs, scaler=scaler)
+                sch.step()
+            evaluate(cur, crit, val_loader, device)
+            report_map(f"shot{it+1}", cur)
+            prev = target_abs
+        lean = cur
+    else:
+        # ===== Bi-level (bai minh): mask-finetune lap -> surgery 1 lan cuoi =====
+        u_pruner = UnstructuredPruner(scope)
+        s_pruner = StructuredPruner(scope)
+        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr,
+                                    momentum=args.momentum, weight_decay=args.weight_decay)
+        # warm-restart: lr reset dau moi vong prune (T_0 = so epoch finetune/vong)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=max(args.finetune_epochs, 1))
+        for it in range(args.prune_iters):
+            sparsity = args.target_sparsity * (it + 1) / args.prune_iters
+            print(f"\n=== Prune iter {it+1}/{args.prune_iters} | sparsity={sparsity:.3f} ===")
+            u_pruner.prune(sensitivity=args.sensitivity_mult * sparsity)
+            s_pruner.prune(prune_ratio=sparsity)
+            print(f"  Song Han global sparsity={u_pruner.global_sparsity():.3f}")
 
-        for ep in range(args.finetune_epochs):
-            train_one_epoch(model, criterion, train_loader, optimizer, device, ep,
-                            args.finetune_epochs, pruner=u_pruner, scaler=scaler)
-            scheduler.step()
-        evaluate(model, criterion, val_loader, device)
+            for ep in range(args.finetune_epochs):
+                train_one_epoch(model, criterion, train_loader, optimizer, device, ep,
+                                args.finetune_epochs, pruner=u_pruner, scaler=scaler)
+                scheduler.step()
+            evaluate(model, criterion, val_loader, device)
 
-    # --- surgery -> lean model ---
-    print("\n=== Model Surgery ===")
+        print("\n=== Model Surgery ===")
+        lean, _ = convert_to_lean(model)
+        lean.to(device)
+
+    # --- luu lean + eval (chung cho ca 2 method) ---
     save_path = os.path.join(args.output_dir, "model_lean.pth")
-    lean, lean_cfg = convert_to_lean(model, save_path=save_path)
-    lean.to(device)
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+    torch.save(lean.state_dict(), save_path)
+    with open(save_path.replace(".pth", ".json"), "w") as f:
+        json.dump(lean.config(), f, indent=2)
     p1 = sum(p.numel() for p in lean.parameters())
-    print(f"Lean saved: {save_path}")
+    print(f"\nLean saved: {save_path}")
     print(f"Params: {p0/1e6:.2f}M -> {p1/1e6:.2f}M  (-{(1-p1/p0)*100:.1f}%)")
 
     print("\nLean model eval:")
