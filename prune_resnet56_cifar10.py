@@ -235,24 +235,32 @@ def cifar10_loaders(data_dir, batch_size, workers=4):
 
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
+    loss_sum = n = 0
     for x, y in loader:
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
         loss = criterion(model(x), y)
         loss.backward()
         optimizer.step()
+        loss_sum += loss.item() * y.size(0)
+        n += y.size(0)
+    return loss_sum / max(n, 1)                          # train loss trung binh
 
 
 @torch.no_grad()
-def validate(model, loader, device):
+def validate(model, loader, device, criterion=None):
     model.eval()
     correct = total = 0
+    loss_sum = 0.0
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        pred = model(x).argmax(1)
-        correct += (pred == y).sum().item()
+        out = model(x)
+        if criterion is not None:
+            loss_sum += criterion(out, y).item() * y.size(0)
+        correct += (out.argmax(1) == y).sum().item()
         total += y.size(0)
-    return 100.0 * correct / total
+    acc = 100.0 * correct / total
+    return (acc, loss_sum / total) if criterion is not None else acc
 
 
 def parse_cpr(s):
@@ -320,20 +328,25 @@ def main():
 
     steps = list(map(int, args.lr_decay_step.split(",")))
 
-    def finetune(model, epochs, tag=""):
+    def finetune(model, epochs, tag="", save_path=None):
         opt = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum,
                               weight_decay=args.weight_decay)
         sch = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=steps, gamma=0.1)
         best = 0.0
         for ep in range(epochs):
-            train_epoch(model, train_loader, criterion, opt, device)
+            tr_loss = train_epoch(model, train_loader, criterion, opt, device)
             sch.step()
-            acc = validate(model, val_loader, device)
-            best = max(best, acc)
+            acc, val_loss = validate(model, val_loader, device, criterion)
+            if acc > best:                                   # best moi -> luu weight epoch nay
+                best = acc
+                if save_path is not None:
+                    torch.save({"state_dict": model.state_dict(), "acc": best}, save_path)
             if wb is not None:
-                wb.log({"val_acc": acc, "best_acc": best, "lr": opt.param_groups[0]["lr"]})
+                wb.log({"val_acc": acc, "best_acc": best, "train_loss": tr_loss,
+                        "val_loss": val_loss, "lr": opt.param_groups[0]["lr"]})
             if ep % 10 == 0 or ep == epochs - 1:
-                print(f"  {tag}[ep {ep+1}/{epochs}] acc={acc:.2f}% best={best:.2f}%")
+                print(f"  {tag}[ep {ep+1}/{epochs}] loss={tr_loss:.3f} "
+                      f"val_loss={val_loss:.3f} acc={acc:.2f}% best={best:.2f}%")
         return best
 
     # ----- prune (one-shot hoac k-shot) -----
@@ -359,9 +372,8 @@ def main():
           f"acc truoc finetune={validate(model, val_loader, device):.2f}%")
 
     print(f"\n=== Finetune cuoi ({args.epochs} epoch) ===")
-    best = finetune(model, args.epochs, tag="ft ")
-    torch.save({"state_dict": model.state_dict(), "acc": best},
-               os.path.join(args.output_dir, "model_best.pth"))
+    save_path = os.path.join(args.output_dir, "model_best.pth")
+    best = finetune(model, args.epochs, tag="ft ", save_path=save_path)  # tu luu best-epoch
     if wb is not None:
         wb.summary["final_acc"] = best
         wb.summary["pruned_params_M"] = p1 / 1e6

@@ -77,6 +77,8 @@ def get_args():
     p.add_argument("--no-map", action="store_true", help="bo qua mAP (chi val-loss)")
     p.add_argument("--conf-thresh", default=0.001, type=float)
     p.add_argument("--nms-thresh", default=0.5, type=float)
+    # wandb (log ca cac buoc prune: mAP + loss moi shot/iter)
+    p.add_argument("--wandb", action="store_true", help="log len wandb")
     return p.parse_args()
 
 
@@ -85,6 +87,12 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     device = resolve_device(args.device)
     print("Device:", device)
+
+    wb = None
+    if args.wandb:
+        import wandb  # env WANDB_API_KEY/PROJECT/ENTITY tu lo (giong train.py)
+        wb = wandb.init(name=os.path.basename(args.output_dir.rstrip("/")),
+                        config=vars(args))
 
     # --- load dense model tu checkpoint (kem config) ---
     try:
@@ -114,14 +122,29 @@ def main():
 
     def report_map(tag, mdl):
         if args.no_map:
-            return
+            return None
         m = evaluate_map(mdl, val_loader, device, nc, args.conf_thresh, args.nms_thresh)
         print(f"  [{tag}] mAP@0.5={m['mAP@0.5']:.4f}  mAP@0.5:0.95={m['mAP@0.5:0.95']:.4f}")
+        return m
+
+    def wb_log(step, sparsity, val, m, params_m):
+        """Log 1 buoc prune len wandb (bo qua neu tat)."""
+        if wb is None:
+            return
+        log = {"prune/step": step, "prune/sparsity": sparsity,
+               "prune/params_M": params_m}
+        if val:
+            log.update({f"prune/val_{k}": v for k, v in val.items()})
+        if m:
+            log["prune/mAP@0.5"] = m["mAP@0.5"]
+            log["prune/mAP@0.5:0.95"] = m["mAP@0.5:0.95"]
+        wb.log(log)
 
     p0 = sum(p.numel() for p in model.parameters())
     print(f"\nMethod={args.method} | Baseline params={p0/1e6:.2f}M | scope={args.scope}")
-    evaluate(model, criterion, val_loader, device)
-    report_map("baseline", model)
+    base_val = evaluate(model, criterion, val_loader, device)
+    base_map = report_map("baseline", model)
+    wb_log(0, 0.0, base_val, base_map, p0 / 1e6)
 
     if args.method == "coring":
         # ===== CORING baseline: k-shot, cat -> SURGERY NGAY -> finetune model nho =====
@@ -146,8 +169,9 @@ def main():
                 train_one_epoch(cur, crit, train_loader, opt, device, ep,
                                 args.finetune_epochs, scaler=scaler)
                 sch.step()
-            evaluate(cur, crit, val_loader, device)
-            report_map(f"shot{it+1}", cur)
+            val = evaluate(cur, crit, val_loader, device)
+            m = report_map(f"shot{it+1}", cur)
+            wb_log(it + 1, target_abs, val, m, sum(p.numel() for p in cur.parameters()) / 1e6)
             prev = target_abs
         lean = cur
     else:
@@ -170,7 +194,9 @@ def main():
                 train_one_epoch(model, criterion, train_loader, optimizer, device, ep,
                                 args.finetune_epochs, pruner=u_pruner, scaler=scaler)
                 scheduler.step()
-            evaluate(model, criterion, val_loader, device)
+            val = evaluate(model, criterion, val_loader, device)
+            m = report_map(f"iter{it+1}", model)
+            wb_log(it + 1, sparsity, val, m, sum(p.numel() for p in model.parameters()) / 1e6)
 
         print("\n=== Model Surgery ===")
         lean, _ = convert_to_lean(model)
@@ -188,8 +214,16 @@ def main():
 
     print("\nLean model eval:")
     lean_crit = YoloLoss(grid_size=lean.grid_size, num_classes=nc)
-    evaluate(lean, lean_crit, val_loader, device)
-    report_map("lean", lean)
+    lean_val = evaluate(lean, lean_crit, val_loader, device)
+    lean_map = report_map("lean", lean)
+    wb_log(args.prune_iters + 1, args.target_sparsity, lean_val, lean_map, p1 / 1e6)
+    if wb is not None:
+        wb.summary["final_params_M"] = p1 / 1e6
+        wb.summary["params_reduction_pct"] = (1 - p1 / p0) * 100
+        if lean_map:
+            wb.summary["final_mAP@0.5"] = lean_map["mAP@0.5"]
+            wb.summary["final_mAP@0.5:0.95"] = lean_map["mAP@0.5:0.95"]
+        wb.finish()
     print(f"\nDone. Lean: {save_path}  +  {save_path.replace('.pth', '.json')}")
 
 
