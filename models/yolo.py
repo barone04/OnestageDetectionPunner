@@ -89,7 +89,7 @@ class YoloModel(nn.Module):
         return self.neck.get_prunable_layers(pruning_type)
 
     def config(self):
-        return {
+        cfg = {
             "backbone": self.backbone_name,
             "input_size": self.input_size,
             "num_classes": self.num_classes,
@@ -97,10 +97,20 @@ class YoloModel(nn.Module):
             "backbone_cfg": self._backbone_cfg,
             "neck_widths": self._neck_widths,
         }
+        if getattr(self, "_variant", None) == "norton":
+            cfg.update({
+                "variant": "norton",
+                "norton_rank": int(self._norton_rank),
+                "norton_scope": self._norton_scope,
+            })
+        return cfg
 
 
 def build_model(cfg):
     """Dung YoloModel tu dict config (dung cho reload / surgery rebuild)."""
+    if cfg.get("variant") == "norton":
+        from .norton import build_norton_model_from_config
+        return build_norton_model_from_config(cfg)
     return YoloModel(
         input_size=cfg.get("input_size", 448),
         backbone=cfg.get("backbone", "resnet18"),

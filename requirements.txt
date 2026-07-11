@@ -5,3 +5,4 @@ numpy==2.2.5
 pillow==12.0.0
 thop
 wandb
+tensorly
