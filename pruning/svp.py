@@ -4,15 +4,17 @@ SVP (Singular Value Pruning) — GAM (Greedy Addition Method) cho YoloModel.
 Port tu SVP-main/pruning_rate.py, ap dung len PrunableConv cua pipeline YOLOv1:
   1. Tinh singular values (SVD tren weight reshape) cho moi layer structured-prunable.
   2. GAM phan bo global so kenh giu lai theo target_rate (compress rate).
-  3. Chon filter giu lai theo norm L1-inf-inf (top-k) va cap nhat s_mask.
+  3. Chon filter giu lai bang core norms tu Tucker decomposition (Algorithm 2).
   4. Sau finetune + surgery -> model lean (giong pipeline bi-level).
 
 Tham khao: SVP-main/pruning_rate.py
 """
 import numpy as np
 import torch
+import tensorly
+from tensorly.decomposition import tucker
 
-from .norms import get_weight, l1inftyinfty
+from .norms import get_weight
 
 
 def compute_singular_values(weight: torch.Tensor) -> np.ndarray:
@@ -20,6 +22,19 @@ def compute_singular_values(weight: torch.Tensor) -> np.ndarray:
     reshaped = weight.view(weight.size(0), -1)
     _, sv, _ = torch.linalg.svd(reshaped, full_matrices=False)
     return sv.detach().cpu().numpy()
+
+
+def compute_core_norms(weight: torch.Tensor) -> torch.Tensor:
+    """
+    Dung Tucker decomposition (HOSVD) de tinh core norms cho moi filter.
+    Core norm phan anh su dong gop vao nuclear norm (filter independence).
+    """
+    # weight shape: (out_channels, in_channels, k_h, k_w)
+    # Tucker decomposition yeu cau input la ndarray hoac tensor phu hop voi backend
+    core, _ = tucker(weight, rank=weight.shape)
+    # Lay norm cua moi slice theo chieu out_channels
+    norms = torch.norm(core.reshape(weight.size(0), -1), dim=1)
+    return norms
 
 
 def find_optimal_channels_gam(
@@ -53,6 +68,7 @@ class SVPPruner:
 
     def __init__(self, model_scope):
         self.model_scope = model_scope
+        tensorly.set_backend("pytorch")
 
     def _get_layers(self):
         return self.model_scope.get_prunable_layers(pruning_type="structured")
@@ -88,7 +104,11 @@ class SVPPruner:
         weight = get_weight(layer)
         n = weight.shape[0]
         num_keep = max(1, min(int(num_keep), n))
-        norms = l1inftyinfty(weight)
+        
+        # Algorithm 2 (GEM): Chon filter dong gop nhieu nhat vao nuclear norm
+        # bang cach tinh core norms tu Tucker decomposition.
+        norms = compute_core_norms(weight)
+        
         _, top_idx = torch.topk(norms, num_keep)
         mask = torch.zeros(n, device=weight.device)
         mask[top_idx] = 1.0

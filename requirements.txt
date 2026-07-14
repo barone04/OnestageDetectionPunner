@@ -7,3 +7,4 @@ thop
 wandb
 pandas
 matplotlib
+tensorly
