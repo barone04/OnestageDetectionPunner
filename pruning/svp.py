@@ -103,11 +103,14 @@ def select_filters_gem_by_nuclear_norm(
 
 def find_optimal_channels_gam(
     singular_values,
-    total_channels_to_keep: int,
+    target_budget: int,
     original_number_of_channels,
+    costs=None,
 ):
     """
     GAM: moi buoc them 1 kenh vao layer co singular value lon nhat tiep theo.
+    - Neu costs=None: target_budget la tong so kenh (total_channels_to_keep).
+    - Neu costs=[...]: target_budget la tong FLOPs (total_flops_to_keep).
     Tra ve list so kenh giu lai cho tung layer.
     """
     num_layers = len(singular_values)
@@ -115,23 +118,49 @@ def find_optimal_channels_gam(
     current_singular_values_candidates = np.array(
         [sv[0] for sv in singular_values]
     )
-    for _ in range(total_channels_to_keep):
+    
+    current_budget = 0
+    # Neu dung FLOPs, ta cung can dam bao moi layer co it nhat 1 kenh de tranh loi model
+    for i in range(num_layers):
+        number_of_channels_to_keep[i] = 1
+        current_budget += costs[i] if costs is not None else 1
+        # Cap nhat candidate sang singular value thu 2
+        if original_number_of_channels[i] > 1:
+            current_singular_values_candidates[i] = singular_values[i][1]
+        else:
+            current_singular_values_candidates[i] = 0.0
+
+    while current_budget < target_budget:
         max_idx = int(np.argmax(current_singular_values_candidates))
+        if current_singular_values_candidates[max_idx] <= 0:
+            break
+            
+        # Kiem tra neu them 1 kenh nua co vuot budget khong (chi ap dung cho FLOPs)
+        cost = costs[max_idx] if costs is not None else 1
+        if costs is not None and current_budget + cost > target_budget:
+            # Dung lai neu khong the them tiep layer nay
+            current_singular_values_candidates[max_idx] = 0.0
+            continue
+
         number_of_channels_to_keep[max_idx] += 1
+        current_budget += cost
+        
         k = number_of_channels_to_keep[max_idx]
         orig = original_number_of_channels[max_idx]
         if k < orig:
             current_singular_values_candidates[max_idx] = singular_values[max_idx][k]
         else:
             current_singular_values_candidates[max_idx] = 0.0
+            
     return number_of_channels_to_keep
 
 
 class SVPPruner:
     """One-shot structured pruning bang SVP-GAM."""
 
-    def __init__(self, model_scope):
+    def __init__(self, model_scope, input_size=448):
         self.model_scope = model_scope
+        self.input_size = input_size
         tensorly.set_backend("pytorch")
 
     def _get_layers(self):
@@ -143,41 +172,97 @@ class SVPPruner:
         original_channels = [w.size(0) for w in weights]
         return singular_values, original_channels
 
+    def _get_layer_flops_per_channel(self, layers):
+        """
+        Tinh FLOPs cua 1 output channel cho moi layer.
+        FLOPs = in_c * k_h * k_w * out_h * out_w (approx).
+        """
+        costs = []
+        # Chay dummy forward qua model de lay resolution cua moi layer neu can, 
+        # nhung o day ta co the xap xi bang cach hook hoac lay tu model_scope neu duoc.
+        # Tuy nhien, PrunableConv thuong khong luu out_h, out_w.
+        # Ta se thuc hien 1 phep thu (dummy forward) de lay output shapes.
+        
+        model = self.model_scope.model
+        device = next(model.parameters()).device
+        dummy = torch.randn(1, 3, self.input_size, self.input_size, device=device)
+        
+        features = {}
+        hooks = []
+        
+        def get_hook(name):
+            def hook(module, input, output):
+                features[name] = output.shape[-2:]
+            return hook
+
+        # Dang ky hook cho tung prunable layer (lay conv thuc su)
+        for i, layer in enumerate(layers):
+            h = layer.conv.register_forward_hook(get_hook(f"l{i}"))
+            hooks.append(h)
+            
+        try:
+            with torch.no_grad():
+                model(dummy)
+        finally:
+            for h in hooks:
+                h.remove()
+        
+        for i, layer in enumerate(layers):
+            conv = layer.conv
+            # out_h * out_w
+            res = features.get(f"l{i}", (self.input_size, self.input_size))
+            # FLOPs cho 1 filter = in_c * k_h * k_w * out_h * out_w
+            # (Nhan 2 neu tinh ca add, nhung o day ta chi can ty le)
+            cost = conv.in_channels * conv.kernel_size[0] * conv.kernel_size[1] * res[0] * res[1]
+            costs.append(float(cost))
+            
+        return costs
+
     @torch.no_grad()
-    def compute_allocation(self, target_rate: float):
+    def compute_allocation(self, target_rate: float, use_flops: bool = True):
         """
         Tinh phan bo kenh. Mac dinh dung GAM.
-        Neu co ruptures, co thi dung Change Point Detection (CPD) nhu SV.py.
+        - use_flops=True: target_rate la ty le FLOPs bi cat.
+        - use_flops=False: target_rate la ty le channels bi cat.
         """
         layers = self._get_layers()
         if not layers:
             raise ValueError("Khong co layer structured-prunable trong scope hien tai.")
 
         singular_values, original_channels = self._get_singular_values_and_channels(layers)
-        total_channels = int(np.sum(original_channels))
-        total_to_keep = int((1.0 - target_rate) * total_channels)
-        total_to_keep = max(total_to_keep, len(layers))
-
-        # Kiem tra xem co nen dung CPD (Change Point Detection) khong
-        # Trong SV.py, ho dung CPD de tim diem gay (knee point) cua singular values
-        # Day chinh la y tuong "slimming" trong file dinh kem.
         
-        use_cpd = rpt is not None
-        if use_cpd:
-            try:
-                channels_to_keep = self._find_optimal_channels_cpd(
-                    singular_values, total_to_keep, original_channels
-                )
-                print("[SVP] Using Change Point Detection (CPD) for allocation.")
-            except Exception as e:
-                print(f"[WARN] CPD failed ({e}), falling back to GAM.")
+        if use_flops:
+            costs_per_channel = self._get_layer_flops_per_channel(layers)
+            total_flops = sum(c * n for c, n in zip(costs_per_channel, original_channels))
+            target_flops_to_keep = int((1.0 - target_rate) * total_flops)
+            
+            # Neu co rpt, hien tai CPD trong code cu chi ho tro channel budget.
+            # Ta se uu tien GAM cho FLOPs budget.
+            channels_to_keep = find_optimal_channels_gam(
+                singular_values, target_flops_to_keep, original_channels, costs=costs_per_channel
+            )
+            print(f"[SVP] Allocation based on FLOPs. Total target: {target_flops_to_keep/1e6:.1f}M FLOPs.")
+        else:
+            total_channels = int(np.sum(original_channels))
+            total_to_keep = int((1.0 - target_rate) * total_channels)
+            total_to_keep = max(total_to_keep, len(layers))
+
+            use_cpd = rpt is not None
+            if use_cpd:
+                try:
+                    channels_to_keep = self._find_optimal_channels_cpd(
+                        singular_values, total_to_keep, original_channels
+                    )
+                    print("[SVP] Using Change Point Detection (CPD) for allocation.")
+                except Exception as e:
+                    print(f"[WARN] CPD failed ({e}), falling back to GAM.")
+                    channels_to_keep = find_optimal_channels_gam(
+                        singular_values, total_to_keep, original_channels
+                    )
+            else:
                 channels_to_keep = find_optimal_channels_gam(
                     singular_values, total_to_keep, original_channels
                 )
-        else:
-            channels_to_keep = find_optimal_channels_gam(
-                singular_values, total_to_keep, original_channels
-            )
 
         compress_rates = [
             1.0 - k / orig for k, orig in zip(channels_to_keep, original_channels)
@@ -274,15 +359,16 @@ class SVPPruner:
         layer.mask_handler.apply(layer.conv)
 
     @torch.no_grad()
-    def prune(self, target_rate: float = 0.5, verbose: bool = True):
-        layers, channels_to_keep, compress_rates = self.compute_allocation(target_rate)
+    def prune(self, target_rate: float = 0.5, use_flops: bool = True, verbose: bool = True):
+        layers, channels_to_keep, compress_rates = self.compute_allocation(target_rate, use_flops=use_flops)
         for layer, k in zip(layers, channels_to_keep):
             self._apply_layer_mask(layer, k)
 
         if verbose:
             kept = sum(channels_to_keep)
             total = sum(get_weight(l).size(0) for l in layers)
-            print(f"[SVP-GAM] target_rate={target_rate:.3f} -> "
+            budget_type = "FLOPs" if use_flops else "channels"
+            print(f"[SVP-GAM] target_{budget_type}_rate={target_rate:.3f} -> "
                   f"kept {kept}/{total} filters ({kept/total*100:.1f}%) "
                   f"across {len(layers)} layers.")
             print(f"  compress_rate per layer (first 10): "

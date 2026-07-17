@@ -54,7 +54,9 @@ def get_args():
     p.add_argument("--data-path", required=True)
     p.add_argument("--checkpoint", required=True, help="dense model_best.pth (co config)")
     p.add_argument("--target-rate", default=0.5, type=float,
-                   help="SVP compress rate (ty le kenh bi cat), mac dinh 0.5")
+                   help="SVP compress rate (mac dinh 0.5)")
+    p.add_argument("--budget", default="flops", choices=["flops", "channels"],
+                   help="Budget type: flops (mac dinh) hoac channels")
     p.add_argument("--finetune-epochs", default=5, type=int)
     p.add_argument("--scope", default="all", choices=["all", "backbone", "neck"])
     p.add_argument("--batch-size", default=16, type=int)
@@ -97,7 +99,7 @@ def main():
 
     criterion = YoloLoss(grid_size=model.grid_size, num_classes=cfg["num_classes"])
     scope = Scope(model, args.scope)
-    svp_pruner = SVPPruner(scope)
+    svp_pruner = SVPPruner(scope, input_size=cfg.get("input_size", 448))
 
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr,
                                 momentum=args.momentum, weight_decay=args.weight_decay)
@@ -118,8 +120,8 @@ def main():
     evaluate(model, criterion, val_loader, device)
     report_map("baseline", model)
 
-    print(f"\n=== SVP-GAM prune | target_rate={args.target_rate:.3f} ===")
-    svp_pruner.prune(target_rate=args.target_rate)
+    print(f"\n=== SVP-GAM prune | target_rate={args.target_rate:.3f} | budget={args.budget} ===")
+    svp_pruner.prune(target_rate=args.target_rate, use_flops=(args.budget == "flops"))
 
     if args.finetune_epochs > 0:
         print(f"\n=== Finetune {args.finetune_epochs} epoch(s) ===")
