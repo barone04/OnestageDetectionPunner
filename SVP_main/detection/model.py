@@ -14,7 +14,7 @@ from torchvision.ops.feature_pyramid_network import ExtraFPNBlock, LastLevelMaxP
 import sys
 
 sys.path.append("..")
-from models.resnet50 import resnet50, ResNet50
+from SVP_main.models_svp.resnet50 import resnet50, ResNet50
 
 
 def fasterrcnn_resnet50_fpn(

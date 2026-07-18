@@ -1,6 +1,6 @@
 import argparse
 import torch
-from models import *
+from models_svp import *
 from detection.model import (
     fasterrcnn_resnet50_fpn,
     maskrcnn_resnet50_fpn,

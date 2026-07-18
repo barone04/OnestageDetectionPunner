@@ -1,7 +1,7 @@
 import argparse
 import torch
 from utils import get_cpr
-from models import *
+from models_svp import *
 import time
 
 

@@ -19,7 +19,7 @@ from helpers import get_cpr
 import sys
 
 sys.path.append("..")
-from models import resnet34, resnet50, mobilenetv2
+from models_svp import resnet34, resnet50, mobilenetv2
 
 
 def train_one_epoch(

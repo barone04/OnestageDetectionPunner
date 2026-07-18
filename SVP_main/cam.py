@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from models import resnet50
+from models_svp import resnet50
 from utils import get_cpr
 from pytorch_grad_cam import (
     GradCAM,

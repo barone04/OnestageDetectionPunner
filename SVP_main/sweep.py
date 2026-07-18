@@ -4,14 +4,17 @@ import time
 from accelerate import Accelerator
 import torch
 import torch.nn as nn
-import copy
-from models import *
+from models_svp import *
 from utils import get_cpr
 from data import get_dataloaders
+import wandb
+import ast
+import copy
+from train import test
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="CIFAR10/100 Training")
+    parser = argparse.ArgumentParser(description="CIFAR10/100 Sweeping")
     parser.add_argument(
         "-n",
         "--num-classes",
@@ -47,20 +50,27 @@ def parse_args():
         metavar="N",
         help="number of total epochs to run.Default: 600",
     )
-    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--dataset-path", type=str, default=os.getenv("DATASETS"))
-    parser.add_argument("--lr", default=0.5, type=float, help="initial learning rate")
     parser.add_argument(
-        "--momentum", default=0.9, type=float, metavar="M", help="momentum"
+        "--bs",
+        type=ast.literal_eval,
+        default=[128, 256],
+        help="list of batch sizes",
+    )
+    parser.add_argument(
+        "--lr",
+        type=ast.literal_eval,
+        default=[0.5, 0.1, 0.05, 0.01, 0.005],
+        help="list of learning rates",
     )
     parser.add_argument(
         "--wd",
-        "--weight-decay",
-        default=2e-5,
-        type=float,
-        metavar="W",
-        help="weight decay (default: 2e-5)",
-        dest="weight_decay",
+        type=ast.literal_eval,
+        default=[2e-5, 5e-5],
+        help="list of weight decays",
+    )
+    parser.add_argument(
+        "--momentum", default=0.9, type=float, metavar="M", help="momentum"
     )
     parser.add_argument("--label-smoothing", type=float, default=0.1)
     parser.add_argument("--eta-min", type=float, default=0)
@@ -76,18 +86,49 @@ def parse_args():
         default="[0.]*100",
         help="list of compress rate of each layer. Default: [0.]*100",
     )
+    parser.add_argument(
+        "-t",
+        "--target",
+        default=99.99,
+        type=float,
+        help="target accuracy. Default: 99.99",
+    )
 
     return parser.parse_args()
 
 
+args = parse_args()
+sweep_configuration = {
+    "method": "grid",
+    "name": "sweep",
+    "metric": {"goal": "maximize", "name": "top1"},
+    "parameters": {
+        "bs": {"values": args.bs},
+        "lr": {"values": args.lr},
+        "wd": {"values": args.wd},
+    },
+}
+
+sweep_id = wandb.sweep(
+    sweep=sweep_configuration,
+    project=f"SVP Sweep scratch model={args.model}, num classes={args.num_classes}, cpr={args.compress_rate}",
+)
+args.output = os.path.join(
+    args.output, args.model, str(args.num_classes), args.compress_rate
+)
+
+
 def main():
     accelerator = Accelerator(split_batches=True)
-    args = parse_args()
+    run = wandb.init()
+    wandb_batch_size = wandb.config.bs
+    wandb_lr = wandb.config.lr
+    wandb_weight_decay = wandb.config.wd
     accelerator.print(args)
-
-    args.output = os.path.join(
-        args.output, args.model, str(args.num_classes), args.compress_rate
+    accelerator.print(
+        f"batch_size={wandb_batch_size}, lr={wandb_lr}, weight_decay={wandb_weight_decay}"
     )
+
     if not os.path.isdir(args.output):
         os.makedirs(args.output)
 
@@ -96,7 +137,7 @@ def main():
         args.dataset_path,
         args.mixup_alpha,
         args.cutmix_alpha,
-        args.batch_size,
+        wandb_batch_size,
     )
     total_steps = args.epochs * len(train_loader)
     total_steps = 10 * (total_steps // 10)
@@ -129,9 +170,9 @@ def main():
         if era == 0:
             optimizer = torch.optim.SGD(
                 net.parameters(),
-                lr=args.lr,
+                lr=wandb_lr,
                 momentum=args.momentum,
-                weight_decay=args.weight_decay,
+                weight_decay=wandb_weight_decay,
             )
             scheduler = torch.optim.lr_scheduler.LinearLR(
                 optimizer, start_factor=0.01, total_iters=len(train_loader) * 5
@@ -139,9 +180,9 @@ def main():
         else:
             optimizer = torch.optim.SGD(
                 net.parameters(),
-                lr=args.lr * (args.momentum ** (era - 1)),
+                lr=wandb_lr * (args.momentum ** (era - 1)),
                 momentum=args.momentum,
-                weight_decay=args.weight_decay,
+                weight_decay=wandb_weight_decay,
             )
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, total_steps, args.eta_min
@@ -198,6 +239,13 @@ def main():
                 "{:6.2f}%".format(score),
                 end="",
             )
+            wandb.log(
+                {
+                    "peak": peak,
+                    "top1": score,
+                    "lr": lr,
+                }
+            )
             if score > peak:
                 peak = score
                 best_state_dict = copy.deepcopy(net.state_dict())
@@ -209,6 +257,17 @@ def main():
                 ),
                 end="",
             )
+            delta = score - args.target
+            if delta > 0 and delta < 0.5:
+                t_path = os.path.join(
+                    args.output, f"{args.model}_{args.compress_rate}_{score:.2f}.pt"
+                )
+                torch.save(
+                    {
+                        "state_dict": net.state_dict(),
+                    },
+                    t_path,
+                )
             epoch += 1
             if (era == 0 and step >= total_steps_for_era) or (
                 era > 0 and step / total_steps_for_era > target[idx_target]
@@ -224,9 +283,8 @@ def main():
             int(total_time / 3600), (int(total_time) % 3600) // 60
         )
     )
-    accelerator.print("Peak perf is {:6.2f}%".format(peak))
 
-    name = f"{args.compress_rate}_{args.batch_size}_{args.lr}_{args.weight_decay}"
+    name = f"{args.compress_rate}_{wandb_batch_size}_{wandb_lr}_{wandb_weight_decay}"
     path = os.path.join(args.output, f"{args.model}_{name}_{peak:.2f}.pt")
     torch.save(
         {
@@ -236,21 +294,5 @@ def main():
     )
 
 
-def test(net, test_loader):
-    net.eval()
-    correct = 0
-    total = 0
-    with torch.inference_mode():
-        for batch_idx, (inputs, targets) in enumerate(test_loader):
-            outputs = net(inputs)
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum()
-
-    net.train()
-
-    return correct / total
-
-
 if __name__ == "__main__":
-    main()
+    wandb.agent(sweep_id, function=main)

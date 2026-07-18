@@ -2,7 +2,7 @@ import argparse
 import torch
 import torch.nn as nn
 import numpy as np
-from models import *
+from models_svp import *
 
 
 def parse_args():

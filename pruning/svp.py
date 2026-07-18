@@ -1,13 +1,13 @@
 """
 SVP (Singular Value Pruning) — GAM (Greedy Addition Method) cho YoloModel.
 
-Port tu SVP-main/pruning_rate.py, ap dung len PrunableConv cua pipeline YOLOv1:
+Port tu SVP_main/pruning_rate.py, ap dung len PrunableConv cua pipeline YOLOv1:
   1. Tinh singular values (SVD tren weight reshape) cho moi layer structured-prunable.
   2. GAM phan bo global so kenh giu lai theo target_rate (compress rate).
   3. GEM chon filter trong tung layer: bo dan filter lam giam nuclear norm it nhat.
   4. Sau finetune + surgery -> model lean (giong pipeline bi-level).
 
-Tham khao: SVP-main/pruning_rate.py
+Tham khao: SVP_main/pruning_rate.py
 """
 import numpy as np
 import torch

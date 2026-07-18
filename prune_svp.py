@@ -1,6 +1,6 @@
 """
 prune_svp.py — SVP (Singular Value Pruning) + finetune + surgery.
-Thay the bi-level (Song Han + L1-inf-inf) bang GAM tu SVP-main.
+Thay the bi-level (Song Han + L1-inf-inf) bang GAM tu SVP_main.
 
 Quy trinh:
   1. GAM phan bo kenh structured theo target_rate (singular values)

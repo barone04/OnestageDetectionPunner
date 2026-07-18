@@ -8,3 +8,4 @@ wandb
 pandas
 matplotlib
 tensorly
+ruptures
