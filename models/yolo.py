@@ -103,6 +103,16 @@ class YoloModel(nn.Module):
                 "norton_rank": int(self._norton_rank),
                 "norton_scope": self._norton_scope,
             })
+            if hasattr(self, "_norton_prune_ratio"):
+                cfg["norton_prune_ratio"] = float(self._norton_prune_ratio)
+            if hasattr(self, "_norton_compress_rate"):
+                cfg["norton_compress_rate"] = list(self._norton_compress_rate)
+            if hasattr(self, "_norton_prune_layout"):
+                cfg["norton_prune_layout"] = list(self._norton_prune_layout)
+            if hasattr(self, "_norton_copy_bn"):
+                cfg["norton_copy_bn"] = bool(self._norton_copy_bn)
+            if hasattr(self, "_norton_prune_criterion"):
+                cfg["norton_prune_criterion"] = self._norton_prune_criterion
         return cfg
 
 

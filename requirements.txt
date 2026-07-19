@@ -4,5 +4,5 @@ torchvision==0.20.1
 numpy==2.2.5
 pillow==12.0.0
 thop
-wandb
+wandb>=0.22.3
 tensorly

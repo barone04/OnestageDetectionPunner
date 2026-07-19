@@ -2,14 +2,15 @@
 # ===========================================================================
 # NORTON comparison path inside the same YOLOv1 benchmark environment.
 #   Step 1: train DENSE (same as OnestageDetectionPunner)
-#   Step 2: CP-decompose eligible 3x3 convs with NORTON-style blocks + finetune
-#   Step 3: benchmark DENSE vs NORTON
+#   Step 2: CP-decompose eligible 3x3 convs + finetune + save checkpoint
+#   Step 3: one-shot NORTON prune from that checkpoint + finetune
+#   Step 4: benchmark DENSE vs NORTON
 #
 # Run from repo root:
 #   bash scripts/run_norton.sh
 #
 # Override without editing:
-#   BACKBONE=resnet18 NORTON_RANK=6 bash scripts/run_norton.sh
+#   BACKBONE=resnet18 NORTON_RANK=7 bash scripts/run_norton.sh
 # ===========================================================================
 set -e
 
@@ -26,36 +27,77 @@ PY="${PY:-python}"
 
 OUT="${OUT:-./output/yolo_${BACKBONE}_norton}"
 DENSE_EPOCHS="${DENSE_EPOCHS:-70}"
-NORTON_EPOCHS="${NORTON_EPOCHS:-80}"
-NORTON_RANK="${NORTON_RANK:-6}"
+NORTON_DECOMPOSE_EPOCHS="${NORTON_DECOMPOSE_EPOCHS:-80}"
+NORTON_PRUNE_EPOCHS="${NORTON_PRUNE_EPOCHS:-80}"
+NORTON_RANK="${NORTON_RANK:-7}"
 NORTON_SCOPE="${NORTON_SCOPE:-all}"       # all | backbone | neck
+NORTON_PRUNE_RATIO="${NORTON_PRUNE_RATIO:-0.5}"
+# Optional per-group expression, e.g. '[0.1]*8+[0.2]*5' for ResNet-18 + neck.
+# When set, this takes the place of NORTON_PRUNE_RATIO.
+NORTON_COMPRESS_RATE="${NORTON_COMPRESS_RATE:-}"
+NORTON_CRITERION="${NORTON_CRITERION:-pabs}"  # pabs | csa | vbd
+NORTON_COPY_BN="${NORTON_COPY_BN:-0}"          # 0 matches released ResNet-56 code
+NORTON_WARMUP_EPOCHS="${NORTON_WARMUP_EPOCHS:-5}"
+NORTON_WARMUP_DECAY="${NORTON_WARMUP_DECAY:-0.01}"
+SEED="${SEED:-0}"
+LR="${LR:-0.001}"
 
 WANDB="${WANDB:-0}"
-WANDB_ARG=""; [ "$WANDB" = "1" ] && WANDB_ARG="--wandb"
+WANDB_GROUP="${WANDB_GROUP:-norton-yolo-${BACKBONE}-deepfish}"
+ENV_FILE="${ENV_FILE:-}"
+WANDB_ARGS=()
+if [ "$WANDB" = "1" ]; then
+    WANDB_ARGS=(--wandb --wandb-group "$WANDB_GROUP")
+    if [ -n "$ENV_FILE" ]; then
+        WANDB_ARGS+=(--env-file "$ENV_FILE")
+    fi
+fi
 
 PRETRAINED="${PRETRAINED:-1}"
 PRET_ARG=""; [ "$PRETRAINED" = "1" ] && PRET_ARG="--pretrained-backbone"
+
+PRUNE_ARGS=(--prune-ratio "$NORTON_PRUNE_RATIO")
+if [ -n "$NORTON_COMPRESS_RATE" ]; then
+    PRUNE_ARGS=(--compress-rate "$NORTON_COMPRESS_RATE")
+fi
+
+BN_ARGS=()
+if [ "$NORTON_COPY_BN" = "1" ]; then
+    BN_ARGS=(--copy-bn)
+fi
 
 echo "=============================================================="
 echo " YOLOv1 ($BACKBONE) NORTON comparison"
 echo "=============================================================="
 
-echo "[Step 1/3] Train DENSE ..."
-$PY train.py --data-path $DATA --backbone $BACKBONE --num-classes $NUM_CLASSES \
-    --input-size $INPUT --epochs $DENSE_EPOCHS --batch-size $BATCH --workers $WORKERS \
-    --device $DEVICE --augment $WANDB_ARG $PRET_ARG --output-dir $OUT/step1_dense
+echo "[Step 1/4] Train DENSE ..."
+"$PY" train.py --data-path "$DATA" --backbone "$BACKBONE" --num-classes "$NUM_CLASSES" \
+    --input-size "$INPUT" --epochs "$DENSE_EPOCHS" --batch-size "$BATCH" --workers "$WORKERS" \
+    --device "$DEVICE" --augment "${WANDB_ARGS[@]}" $PRET_ARG \
+    --wandb-run-name "${BACKBONE}-dense-deepfish" \
+    --lr "$LR" \
+    --lr-warmup-epochs "$NORTON_WARMUP_EPOCHS" \
+    --lr-warmup-decay "$NORTON_WARMUP_DECAY" --seed "$SEED" \
+    --output-dir "$OUT/step1_dense"
 
-echo "[Step 2/3] Apply NORTON CP decomposition + finetune ..."
-$PY norton.py --checkpoint $OUT/step1_dense/model_best.pth --data-path $DATA \
-    --rank $NORTON_RANK --scope $NORTON_SCOPE --finetune-epochs $NORTON_EPOCHS \
-    --batch-size $BATCH --workers $WORKERS --device $DEVICE \
-    --output-dir $OUT/step2_norton
+echo "[Steps 2-3/4] Decompose + finetune, then one-shot prune + finetune ..."
+"$PY" norton.py --checkpoint "$OUT/step1_dense/model_best.pth" --data-path "$DATA" \
+    --rank "$NORTON_RANK" --scope "$NORTON_SCOPE" \
+    "${PRUNE_ARGS[@]}" "${BN_ARGS[@]}" --criterion "$NORTON_CRITERION" \
+    --decompose-finetune-epochs "$NORTON_DECOMPOSE_EPOCHS" \
+    --prune-finetune-epochs "$NORTON_PRUNE_EPOCHS" \
+    --lr "$LR" \
+    --lr-warmup-epochs "$NORTON_WARMUP_EPOCHS" \
+    --lr-warmup-decay "$NORTON_WARMUP_DECAY" --seed "$SEED" \
+    --batch-size "$BATCH" --workers "$WORKERS" --device "$DEVICE" \
+    --output-dir "$OUT/step2_norton" \
+    "${WANDB_ARGS[@]}" --wandb-run-name "${BACKBONE}-norton-deepfish"
 
-echo "[Step 3/3] Benchmark DENSE vs NORTON ..."
-$PY benchmark.py --dense $OUT/step1_dense/model_best.pth \
-    --pruned $OUT/step2_norton/model_best.pth \
-    --data-path $DATA --num-classes $NUM_CLASSES \
-    --batch-size $BATCH --workers $WORKERS --device $DEVICE
+echo "[Step 4/4] Benchmark DENSE vs NORTON ..."
+"$PY" benchmark.py --dense "$OUT/step1_dense/model_best.pth" \
+    --pruned "$OUT/step2_norton/model_best.pth" \
+    --data-path "$DATA" --num-classes "$NUM_CLASSES" \
+    --batch-size "$BATCH" --workers "$WORKERS" --device "$DEVICE"
 
 echo "=============================================================="
 echo " DONE. Final: $OUT/step2_norton/model_best.pth"

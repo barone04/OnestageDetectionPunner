@@ -51,7 +51,10 @@ def evaluate_map(model, loader, device, num_classes,
     n_gt = {c: 0 for c in range(num_classes)}
     img_id = 0
 
-    for names, imgs, labels, shapes in loader:
+    total = max(len(loader), 1)
+    print_every = max(total // 10, 1)
+    print(f"  [mAP] collecting predictions from {total} batches", flush=True)
+    for batch_index, (names, imgs, labels, shapes) in enumerate(loader):
         out = model.infer(imgs.to(device)).cpu()    # (B, SS, 6)
         for b in range(out.shape[0]):
             pred = out[b]
@@ -79,8 +82,11 @@ def evaluate_map(model, loader, device, num_classes,
                         gts[c][img_id] = gb[m]
                         n_gt[c] += int(m.sum())
             img_id += 1
+        if batch_index % print_every == 0 or batch_index + 1 == total:
+            print(f"  [mAP {batch_index + 1}/{total}]", flush=True)
 
     map_per_iou = {}
+    print("  [mAP] matching detections across IoU thresholds", flush=True)
     for t in iou_thresholds:
         aps = []
         for c in range(num_classes):

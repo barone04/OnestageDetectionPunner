@@ -40,12 +40,13 @@ def train_one_epoch(model, criterion, loader, optimizer, device, epoch,
 
         if i % log_every == 0:
             print(f"  [E{epoch+1}/{total_epochs} {i:>4}/{n}] "
-                  + " ".join(f"{k}={v.item():.4f}" for k, v in ld.items()))
+                  + " ".join(f"{k}={v.item():.4f}" for k, v in ld.items()),
+                  flush=True)
 
     dt = time.time() - t0
     avg = {k: v / n for k, v in agg.items()}
     print(f"  -> epoch {epoch+1} train: " + " ".join(f"{k}={v:.4f}" for k, v in avg.items())
-          + f"  ({dt:.1f}s)")
+          + f"  ({dt:.1f}s)", flush=True)
     return avg
 
 
@@ -54,12 +55,17 @@ def evaluate(model, criterion, loader, device):
     model.eval()
     agg = {}
     n = max(len(loader), 1)
-    for names, imgs, labels, shapes in loader:
+    total = max(len(loader), 1)
+    print_every = max(total // 10, 1)
+    for index, (names, imgs, labels, shapes) in enumerate(loader):
         imgs = imgs.to(device)
         preds = model(imgs)
         ld = criterion(preds, labels)
         for k, v in ld.items():
             agg[k] = agg.get(k, 0.0) + float(v.item())
+        if index % print_every == 0 or index + 1 == total:
+            print(f"  [VAL {index + 1}/{total}]", flush=True)
     avg = {k: v / n for k, v in agg.items()}
-    print("  -> val: " + " ".join(f"{k}={v:.4f}" for k, v in avg.items()))
+    print("  -> val: " + " ".join(f"{k}={v:.4f}" for k, v in avg.items()),
+          flush=True)
     return avg
