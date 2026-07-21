@@ -32,11 +32,12 @@ Import GAM tu pruning.svp (ban rebuild GAM cua minh):
 import os
 import math
 import argparse
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torch.utils.data.dataloader import default_collate
@@ -47,10 +48,9 @@ from pruning.svp import compute_singular_values, find_optimal_channels_gam
 
 
 # ===========================================================================
-# ResNet-56 cho CIFAR-10 — PORT NGUYEN tu SVP-main/models/resnet.py
-# (adapt_channel + BasicBlock + ResNet + resnet56). Format compress_rate cua SVP:
-#   stage_oup_cprate = [cpr[0]] + cpr[1]*L0 + cpr[2]*L1 + [0.]*L2
-#   mid_cprate       = compress_rate[1:]
+# ResNet-56 CIFAR-10 — Option A (He/CORING/NORTON style: stem conv1/bn1, shortcut
+# zero-pad KHONG param) de KHOP checkpoint SLIMING release (cifar10_resnet56_*.pt).
+# GAM cap so kenh mid per-block qua mid_channel_override (overall giu full).
 # ===========================================================================
 def adapt_channel(compress_rates, layers):
     """
@@ -105,66 +105,55 @@ def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     )
 
 
-def conv1x1(in_planes: int, out_planes: int, stride: int = 1):
-    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+class LambdaLayer(nn.Module):
+    def __init__(self, lambd):
+        super().__init__()
+        self.lambd = lambd
+
+    def forward(self, x):
+        return self.lambd(x)
 
 
 class BasicBlock(nn.Module):
+    """Option A (He CIFAR): shortcut = zero-pad KHONG param — khop ckpt SLIMING/CORING/NORTON."""
+
     expansion: int = 1
 
-    def __init__(
-        self,
-        midplanes,
-        inplanes: int,
-        planes: int,
-        stride: int = 1,
-        downsample: Optional[nn.Module] = None,
-    ):
+    def __init__(self, midplanes, inplanes, planes, stride=1):
         super().__init__()
         self.conv1 = conv3x3(inplanes, midplanes, stride)
         self.bn1 = nn.BatchNorm2d(midplanes)
+        self.relu1 = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(midplanes, planes)
         self.bn2 = nn.BatchNorm2d(planes)
-        self.downsample = downsample
+        self.relu2 = nn.ReLU(inplace=True)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or inplanes != planes:
+            pad = (planes - inplanes) // 2
+            if stride != 1:
+                self.shortcut = LambdaLayer(lambda x: F.pad(
+                    x[:, :, ::2, ::2],
+                    (0, 0, 0, 0, pad, planes - inplanes - pad), "constant", 0))
+            else:
+                self.shortcut = LambdaLayer(lambda x: F.pad(
+                    x, (0, 0, 0, 0, pad, planes - inplanes - pad), "constant", 0))
 
     def forward(self, x):
-        identity = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = torch.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-
-        if self.downsample is not None:
-            identity = self.downsample(x)
-
-        out += identity
-        out = torch.relu(out)
-
-        return out
+        out = self.relu1(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        return self.relu2(out)
 
 
 class ResNet(nn.Module):
     def __init__(
-        self, block, layers, compress_rate, num_classes, width,
-        zero_init_residual=False, mid_channel_override=None,
+        self, block, layers, compress_rate, num_classes, width=16,
+        mid_channel_override=None,
     ):
         super().__init__()
-        self.inplanes = width
-        self.dilation = 1
-        replace_stride_with_dilation = [False, False, False]
-
-        # --- MID-ONLY residual-safe (chuan CHIP/CORING) ---
-        # SVP KHONG release mapping ResNet; `adapt_channel` co format compress_rate
-        # bi CHONG INDEX: compress_rate[1],[2],[3] duoc dung cho CA stage-output
-        # (residual) LAN mid cua 3 block dau -> khong control mid doc lap, de prune
-        # nham residual. Vi vay: neu co `mid_channel_override` (list so kenh mid
-        # per-block, len = tong so block), ta dung THANG no cho mid_channel va GIU
-        # overall_channel = full model (adapt_channel voi cprate 0). Downsample/
-        # residual giu nguyen -> an toan. GAM chi cap so kenh mid, ta do MACs de
-        # dose target_rate.
+        # MID-ONLY: GAM cap so kenh mid per-block qua mid_channel_override, GIU
+        # overall_channel = full (adapt_channel voi cprate 0). Shortcut Option A
+        # (zero-pad, KHONG param) -> khop ckpt SLIMING release + CORING/NORTON.
         if mid_channel_override is not None:
             full_overall, _ = adapt_channel([0.0] * 100, layers)
             self.overall_channel = full_overall
@@ -173,41 +162,17 @@ class ResNet(nn.Module):
             self.overall_channel, self.mid_channel = adapt_channel(compress_rate, layers)
 
         self.layer_num = 0
-        self.embed = nn.Sequential(
-            nn.Conv2d(
-                3,
-                self.overall_channel[self.layer_num],
-                kernel_size=3,
-                stride=1,
-                padding=1,
-                bias=False,
-            ),
-            nn.BatchNorm2d(
-                self.overall_channel[self.layer_num],
-            ),
-            nn.ReLU(inplace=True),
+        self.conv1 = nn.Conv2d(
+            3, self.overall_channel[0], kernel_size=3, stride=1, padding=1, bias=False
         )
-        self.layer_num += 1
-
-        self.layer1 = self._make_layer(block, width, layers[0], stride=1)
-        self.layer2 = self._make_layer(
-            block,
-            width * 2,
-            layers[1],
-            stride=2,
-            dilate=replace_stride_with_dilation[0],
-        )
-        self.layer3 = self._make_layer(
-            block,
-            width * 4,
-            layers[2],
-            stride=2,
-            dilate=replace_stride_with_dilation[1],
-        )
-
-        last_out_channels = self.layer3[-1].conv2.out_channels
-        self.layer4 = nn.Identity()
-        self.fc = nn.Linear(last_out_channels * block.expansion, num_classes)
+        self.bn1 = nn.BatchNorm2d(self.overall_channel[0])
+        self.relu = nn.ReLU(inplace=True)
+        self.layer_num = 1
+        self.layer1 = self._make_layer(block, layers[0], stride=1)
+        self.layer2 = self._make_layer(block, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, layers[2], stride=2)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(self.overall_channel[-1], num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -216,66 +181,26 @@ class ResNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-        # Zero-init BN cuoi moi residual branch (theo SVP / arxiv 1706.02677).
-        if zero_init_residual:
-            for m in self.modules():
-                if isinstance(m, BasicBlock) and m.bn2.weight is not None:
-                    nn.init.constant_(m.bn2.weight, 0)  # type: ignore[arg-type]
-
-    def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
-        downsample = None
-        if dilate:
-            self.dilation *= stride
-            stride = 1
-        if stride != 1 or self.inplanes != self.overall_channel[self.layer_num]:
-            downsample = nn.Sequential(
-                conv1x1(
-                    self.overall_channel[self.layer_num - 1],
-                    self.overall_channel[self.layer_num],
-                    stride,
-                ),
-                nn.BatchNorm2d(self.overall_channel[self.layer_num]),
-            )
-
-        layers = []
-        layers.append(
-            block(
-                self.mid_channel[self.layer_num - 1],
-                self.overall_channel[self.layer_num - 1],
-                self.overall_channel[self.layer_num],
-                stride,
-                downsample,
-            )
-        )
+    def _make_layer(self, block, blocks, stride):
+        layers = [block(self.mid_channel[self.layer_num - 1],
+                        self.overall_channel[self.layer_num - 1],
+                        self.overall_channel[self.layer_num], stride)]
         self.layer_num += 1
-
-        self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
-            layers.append(
-                block(
-                    self.mid_channel[self.layer_num - 1],
-                    self.overall_channel[self.layer_num - 1],
-                    self.overall_channel[self.layer_num],
-                    stride=1,
-                )
-            )
+            layers.append(block(self.mid_channel[self.layer_num - 1],
+                                self.overall_channel[self.layer_num - 1],
+                                self.overall_channel[self.layer_num]))
             self.layer_num += 1
-
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        x = self.embed(x)
-
+        x = self.relu(self.bn1(self.conv1(x)))
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.layer4(x)
-
-        x = x.mean(-1).mean(-1)
+        x = self.avgpool(x)
         x = torch.flatten(x, 1)
-        x = self.fc(x)
-
-        return x
+        return self.fc(x)
 
 
 def resnet56(compress_rate, num_classes, width=16, mid_channel_override=None):
@@ -431,8 +356,8 @@ def get_mixupcutmix(mixup_alpha, cutmix_alpha, num_classes):
 def cifar10_loaders(data_dir, batch_size, num_classes, mixup_alpha, cutmix_alpha, workers=4):
     """Nguon = torchvision.datasets.CIFAR10/100(root=data_dir, download=True) — GIONG SVP.
     Augment SVP-style + mixup/cutmix trong collate (KHOP SVP data.py goc)."""
-    # ImageNet stats — SVP data.py dung dung bo nay du la CIFAR (khong phai CIFAR stats).
-    mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+    # CIFAR-10 stats (giong CORING/NORTON) — khop ckpt SLIMING Option-A -> eval baseline dung.
+    mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
     normalize = T.Normalize(mean, std)
     tr_tf = T.Compose([
         T.RandomHorizontalFlip(),
@@ -482,17 +407,6 @@ def _load_pretrained_baseline(pretrain_path, num_classes, device):
     ck = torch.load(pretrain_path, map_location="cpu")
     sd = ck["state_dict"] if isinstance(ck, dict) and "state_dict" in ck else ck
     sd = {k.replace("module.", ""): v for k, v in sd.items()}
-    # Checkpoint kieu HRankPlus/CORING co stem = conv1/bn1; model SVP = embed.0/embed.1.
-    # Remap stem (chi doi tien to stem, layer/fc trung ten san) de load duoc.
-    if "embed.0.weight" not in sd and "conv1.weight" in sd:
-        remap = {}
-        for k, v in sd.items():
-            if k.startswith("conv1."):
-                k = "embed.0." + k[len("conv1."):]
-            elif k.startswith("bn1."):
-                k = "embed.1." + k[len("bn1."):]
-            remap[k] = v
-        sd = remap
     origin.load_state_dict(sd)
     return origin
 
