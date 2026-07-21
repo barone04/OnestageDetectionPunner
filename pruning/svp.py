@@ -11,8 +11,6 @@ Tham khao: SVP_main/pruning_rate.py
 """
 import numpy as np
 import torch
-import tensorly
-from tensorly.decomposition import tucker
 try:
     import ruptures as rpt
 except ImportError:
@@ -33,6 +31,9 @@ def compute_core_norms(weight: torch.Tensor) -> torch.Tensor:
     Dung Tucker decomposition (HOSVD) de tinh core norms cho moi filter.
     Core norm phan anh su dong gop vao nuclear norm (filter independence).
     """
+    import tensorly
+    from tensorly.decomposition import tucker   # lazy: chi HOSVD (core_norms) moi can tensorly
+    tensorly.set_backend("pytorch")
     # weight shape: (out_channels, in_channels, k_h, k_w)
     core, _ = tucker(weight, rank=weight.shape)
     # Lay norm cua moi slice theo chieu out_channels
@@ -161,7 +162,7 @@ class SVPPruner:
     def __init__(self, model_scope, input_size=448):
         self.model_scope = model_scope
         self.input_size = input_size
-        tensorly.set_backend("pytorch")
+        # GAM dung flatten-SVD, khong can tensorly/HOSVD (set_backend lazy trong compute_core_norms)
 
     def _get_layers(self):
         return self.model_scope.get_prunable_layers(pruning_type="structured")
