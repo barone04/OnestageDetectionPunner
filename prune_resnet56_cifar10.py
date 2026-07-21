@@ -375,6 +375,7 @@ def main():
     save_path = os.path.join(args.output_dir, "model_best.pth")
     best = finetune(model, args.epochs, tag="ft ", save_path=save_path)  # tu luu best-epoch
     if wb is not None:
+        wb.save(save_path, base_path=os.path.dirname(save_path), policy="now")  # upload ckpt best cuoi cung
         wb.summary["final_acc"] = best
         wb.summary["pruned_params_M"] = p1 / 1e6
         wb.summary["params_reduction_pct"] = (1 - p1 / p0) * 100
