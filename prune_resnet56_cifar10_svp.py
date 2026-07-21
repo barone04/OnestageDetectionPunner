@@ -482,6 +482,17 @@ def _load_pretrained_baseline(pretrain_path, num_classes, device):
     ck = torch.load(pretrain_path, map_location="cpu")
     sd = ck["state_dict"] if isinstance(ck, dict) and "state_dict" in ck else ck
     sd = {k.replace("module.", ""): v for k, v in sd.items()}
+    # Checkpoint kieu HRankPlus/CORING co stem = conv1/bn1; model SVP = embed.0/embed.1.
+    # Remap stem (chi doi tien to stem, layer/fc trung ten san) de load duoc.
+    if "embed.0.weight" not in sd and "conv1.weight" in sd:
+        remap = {}
+        for k, v in sd.items():
+            if k.startswith("conv1."):
+                k = "embed.0." + k[len("conv1."):]
+            elif k.startswith("bn1."):
+                k = "embed.1." + k[len("bn1."):]
+            remap[k] = v
+        sd = remap
     origin.load_state_dict(sd)
     return origin
 
