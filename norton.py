@@ -28,7 +28,7 @@ from loss import YoloLoss
 from data import YoloDataset
 from engine import train_one_epoch, evaluate
 from utils import evaluate_map
-from utils.tracking import init_wandb
+from utils.tracking import init_wandb, load_dotenv
 
 
 def resolve_device(req):
@@ -41,11 +41,28 @@ def resolve_device(req):
     return torch.device(req)
 
 
+@torch.no_grad()
+def profile_model(model, input_size, device):
+    """Params + MACs (thop, optional) tai batch=1 de tinh reduction."""
+    import copy
+    model.eval()
+    params = sum(p.numel() for p in model.parameters())
+    macs = None
+    try:
+        from thop import profile
+        sample = torch.randn(1, 3, input_size, input_size, device=device)
+        macs, _ = profile(copy.deepcopy(model), inputs=(sample,), verbose=False)
+        macs = float(macs)
+    except Exception as exc:
+        print(f"  [thop] MACs unavailable: {exc}")
+    return params, macs
+
+
 def get_args():
     p = argparse.ArgumentParser(description="NORTON CP decomposition for YOLOv1")
     p.add_argument("--checkpoint", required=True, help="dense model_best.pth with config")
     p.add_argument("--data-path", default="", help="optional; required for finetune/eval")
-    p.add_argument("-r", "--rank", default=7, type=int, help="CP decomposition rank")
+    p.add_argument("-r", "--rank", default=6, type=int, help="CP decomposition rank")
     p.add_argument("--scope", default="all", choices=["all", "backbone", "neck"])
     p.add_argument("--prune-ratio", default=0.0, type=float,
                    help="uniform structured ratio (legacy shortcut for all prune groups)")
@@ -77,7 +94,8 @@ def get_args():
     p.add_argument("--map-every", default=1, type=int)
     p.add_argument("--conf-thresh", default=0.001, type=float)
     p.add_argument("--nms-thresh", default=0.5, type=float)
-    p.add_argument("--wandb", action="store_true", help="log metrics to W&B")
+    p.add_argument("--no-wandb", action="store_true",
+                   help="disable W&B (default: auto-enable if WANDB_API_KEY in .env)")
     p.add_argument("--wandb-project", default="")
     p.add_argument("--wandb-run-name", default="")
     p.add_argument("--wandb-group", default="")
@@ -299,12 +317,18 @@ def main():
     set_seed(args.seed)
     device = resolve_device(args.device)
     print("Device:", device)
+    load_dotenv(args.env_file or None)
+    wandb_enabled = (not args.no_wandb) and bool(os.environ.get("WANDB_API_KEY"))
     run_name = args.wandb_run_name or os.path.basename(args.output_dir.rstrip("/"))
     wandb_run = init_wandb(
-        args.wandb, vars(args), args.wandb_project or "prune-one-stage",
+        wandb_enabled, vars(args), args.wandb_project or "yolo-deepfish-norton",
         run_name, env_file=args.env_file, group=args.wandb_group,
         job_type="norton-yolo",
     )
+    if wandb_run:
+        wandb_run.define_metric("phase_epoch")
+        for prefix in ("decomposed", "pruned"):
+            wandb_run.define_metric(f"{prefix}/*", step_metric="phase_epoch")
 
     ckpt = load_checkpoint(args.checkpoint)
     if not isinstance(ckpt, dict) or "config" not in ckpt or "model" not in ckpt:
@@ -317,6 +341,7 @@ def main():
     dense = build_model(cfg).to(device)
     dense.load_state_dict(ckpt["model"])
     print(f"Loaded dense {cfg['backbone']} | input={cfg['input_size']} | classes={cfg['num_classes']}")
+    dense_params, dense_macs = profile_model(dense, cfg["input_size"], device)
 
     compress_rates, prune_layout = normalize_norton_compress_rate(
         dense, prune_ratio=args.prune_ratio,
@@ -383,6 +408,8 @@ def main():
         print(f"Final checkpoint: {final_path}")
         if wandb_run:
             wandb_run.summary["final_checkpoint"] = final_path
+            if os.path.exists(final_path):
+                wandb_run.save(final_path)
             wandb_run.finish()
         return
     if prune_epochs <= 0:
@@ -419,12 +446,27 @@ def main():
         model, criterion, train_loader, val_loader, device, args,
         prune_epochs, "model", "post-pruning finetune", wandb_run, "pruned",
     )
+    final_params, final_macs = profile_model(model, cfg["input_size"], device)
+    params_drop = (1.0 - final_params / dense_params) * 100.0
+    line = f"\nPruned | params={final_params / 1e6:.3f}M (-{params_drop:.1f}%)"
+    macs_drop = None
+    if dense_macs and final_macs:
+        macs_drop = (1.0 - final_macs / dense_macs) * 100.0
+        line += f" | MACs={final_macs / 1e9:.3f}G (-{macs_drop:.1f}%)"
+    print(line)
     print(f"Done. Decomposed best={decomposed_best:.4f} | final best={final_best:.4f}")
     print(f"Final checkpoint: {final_path}")
     if wandb_run:
         wandb_run.summary["decomposed_best_metric"] = decomposed_best
         wandb_run.summary["final_best_metric"] = final_best
         wandb_run.summary["final_checkpoint"] = final_path
+        if os.path.exists(final_path):
+            wandb_run.save(final_path)   # chi upload best cuoi cung (pruned finetune)
+        wandb_run.summary["pruned_params_M"] = final_params / 1e6
+        wandb_run.summary["params_reduction_pct"] = params_drop
+        if macs_drop is not None:
+            wandb_run.summary["pruned_macs_M"] = final_macs / 1e6
+            wandb_run.summary["macs_reduction_pct"] = macs_drop
         wandb_run.finish()
 
 

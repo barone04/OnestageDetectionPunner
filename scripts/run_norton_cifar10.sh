@@ -21,22 +21,18 @@ DENSE_CHECKPOINT="${DENSE_CHECKPOINT:-}"
 DENSE_EPOCHS="${DENSE_EPOCHS:-0}"
 DECOMPOSE_EPOCHS="${DECOMPOSE_EPOCHS:-400}"
 PRUNE_EPOCHS="${PRUNE_EPOCHS:-400}"
-NORTON_RANK="${NORTON_RANK:-7}"
+NORTON_RANK="${NORTON_RANK:-6}"
 NORTON_CPR="${NORTON_CPR:-[0.]+[0.18]*29}"
 NORTON_CRITERION="${NORTON_CRITERION:-pabs}"
 LR="${LR:-0.05}"
-WANDB="${WANDB:-0}"
+# W&B auto-bat neu .env co WANDB_API_KEY. Dat WANDB=0 de tat.
+WANDB="${WANDB:-1}"
 WANDB_GROUP="${WANDB_GROUP:-norton-resnet56-cifar10}"
 ENV_FILE="${ENV_FILE:-}"
 
-WANDB_ARGS=()
-if [ "$WANDB" = "1" ]; then
-    WANDB_ARGS=(--wandb --wandb-group "$WANDB_GROUP" \
-        --wandb-run-name "resnet56-norton-cifar10")
-    if [ -n "$ENV_FILE" ]; then
-        WANDB_ARGS+=(--env-file "$ENV_FILE")
-    fi
-fi
+WANDB_ARGS=(--wandb-group "$WANDB_GROUP" --wandb-run-name "resnet56-norton-cifar10")
+[ "$WANDB" = "0" ] && WANDB_ARGS+=(--no-wandb)
+[ -n "$ENV_FILE" ] && WANDB_ARGS+=(--env-file "$ENV_FILE")
 
 DENSE_ARGS=()
 if [ -n "$DENSE_CHECKPOINT" ]; then

@@ -23,7 +23,7 @@ from models.norton_cifar import (
     normalize_compress_rate,
     prune_cifar_resnet56,
 )
-from utils.tracking import init_wandb
+from utils.tracking import init_wandb, load_dotenv
 
 
 def get_args():
@@ -37,7 +37,7 @@ def get_args():
                         help="train dense model when no checkpoint is supplied")
     parser.add_argument("--decompose-finetune-epochs", default=400, type=int)
     parser.add_argument("--prune-finetune-epochs", default=400, type=int)
-    parser.add_argument("-r", "--rank", default=7, type=int)
+    parser.add_argument("-r", "--rank", default=6, type=int)
     parser.add_argument(
         "-cpr", "--compress-rate", default="[0.]+[0.18]*29",
         help="30-value NORTON ResNet-56 compression expression",
@@ -61,7 +61,8 @@ def get_args():
     parser.add_argument("--latency-iters", default=50, type=int)
     parser.add_argument("--skip-profile", action="store_true")
     parser.add_argument("--output-dir", default="./output/norton_resnet56_cifar10")
-    parser.add_argument("--wandb", action="store_true", help="log metrics to W&B")
+    parser.add_argument("--no-wandb", action="store_true",
+                        help="disable W&B (default: auto-enable if WANDB_API_KEY in .env)")
     parser.add_argument("--wandb-project", default="")
     parser.add_argument("--wandb-run-name", default="")
     parser.add_argument("--wandb-group", default="")
@@ -175,7 +176,8 @@ def topk_accuracy(logits, targets, topk=(1, 5)):
     return values
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, epoch, epochs):
+def train_one_epoch(model, loader, criterion, optimizer, device, epoch, epochs,
+                    verbose=True):
     model.train()
     loss_sum = top1_sum = top5_sum = count = 0.0
     print_every = max(len(loader) // 10, 1)
@@ -195,7 +197,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, epochs):
         top1_sum += acc1
         top5_sum += acc5
         count += batch
-        if index % print_every == 0:
+        if verbose and index % print_every == 0:
             print(f"  [E{epoch + 1}/{epochs} {index:>4}/{len(loader)}] "
                   f"loss={loss.item():.4f} top1={100.0 * acc1 / batch:.2f}",
                   flush=True)
@@ -207,7 +209,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, epochs):
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion, device, verbose=True):
     model.eval()
     loss_sum = top1_sum = top5_sum = count = 0.0
     total = max(len(loader), 1)
@@ -223,15 +225,16 @@ def evaluate(model, loader, criterion, device):
         top1_sum += acc1
         top5_sum += acc5
         count += batch
-        if index % print_every == 0 or index + 1 == total:
+        if verbose and (index % print_every == 0 or index + 1 == total):
             print(f"  [VAL {index + 1}/{total}]", flush=True)
     metrics = {
         "loss": loss_sum / max(count, 1),
         "top1": 100.0 * top1_sum / max(count, 1),
         "top5": 100.0 * top5_sum / max(count, 1),
     }
-    print(f"  -> val loss={metrics['loss']:.4f} top1={metrics['top1']:.3f} "
-          f"top5={metrics['top5']:.3f}", flush=True)
+    if verbose:
+        print(f"  -> val loss={metrics['loss']:.4f} top1={metrics['top1']:.3f} "
+              f"top5={metrics['top5']:.3f}", flush=True)
     return metrics
 
 
@@ -253,9 +256,11 @@ def make_scheduler(optimizer, epochs, warmup_epochs, warmup_decay):
 
 
 def finetune_phase(model, train_loader, val_loader, criterion, device, args,
-                   epochs, stem, stage, wandb_run=None, metric_prefix=None):
+                   epochs, stem, stage, wandb_run=None, metric_prefix=None,
+                   short_tag=None):
     if epochs <= 0:
         raise ValueError(f"{stage} requires a positive epoch budget")
+    tag = short_tag or stem
     optimizer = torch.optim.SGD(
         model.parameters(), lr=args.lr, momentum=args.momentum,
         weight_decay=args.weight_decay,
@@ -266,7 +271,7 @@ def finetune_phase(model, train_loader, val_loader, criterion, device, args,
     log_prefix = metric_prefix or stem
     best_path = os.path.join(args.output_dir, f"{stem}_best.pth")
     last_path = os.path.join(args.output_dir, f"{stem}_last.pth")
-    initial = evaluate(model, val_loader, criterion, device)
+    initial = evaluate(model, val_loader, criterion, device, verbose=False)
     best_top1 = initial["top1"]
     save_checkpoint(best_path, model, optimizer, -1, best_top1, stage)
     if wandb_run:
@@ -282,16 +287,20 @@ def finetune_phase(model, train_loader, val_loader, criterion, device, args,
     print(f"\n=== {stage}: {epochs} epochs ===")
     for epoch in range(epochs):
         train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch, epochs
+            model, train_loader, criterion, optimizer, device, epoch, epochs,
+            verbose=False,
         )
         scheduler.step()
-        val_metrics = evaluate(model, val_loader, criterion, device)
+        val_metrics = evaluate(model, val_loader, criterion, device, verbose=False)
+        improved = val_metrics["top1"] > best_top1
+        if improved:
+            best_top1 = val_metrics["top1"]
         if wandb_run:
             log = {
                 "phase": log_prefix,
                 "phase_epoch": epoch,
                 f"{log_prefix}/lr": optimizer.param_groups[0]["lr"],
-                f"{log_prefix}/best_top1": max(best_top1, val_metrics["top1"]),
+                f"{log_prefix}/best_top1": best_top1,
             }
             log.update({
                 f"{log_prefix}/train/{key}": value
@@ -303,12 +312,12 @@ def finetune_phase(model, train_loader, val_loader, criterion, device, args,
             })
             wandb_run.log(log)
         save_checkpoint(last_path, model, optimizer, epoch, val_metrics["top1"], stage)
-        if val_metrics["top1"] > best_top1:
-            best_top1 = val_metrics["top1"]
+        if improved:
             save_checkpoint(best_path, model, optimizer, epoch, best_top1, stage)
-            print(f"  ** new {stage} best top1={best_top1:.3f}")
-        print(f"  train top1={train_metrics['top1']:.3f} "
-              f"lr={optimizer.param_groups[0]['lr']:.6f}")
+        if epoch == 0 or (epoch + 1) % 10 == 0 or epoch == epochs - 1:
+            print(f"  {tag} [ep {epoch + 1}/{epochs}] loss={train_metrics['loss']:.3f} "
+                  f"val_loss={val_metrics['loss']:.3f} acc={val_metrics['top1']:.2f}% "
+                  f"best={best_top1:.2f}%", flush=True)
 
     best_checkpoint = load_checkpoint(best_path)
     model.load_state_dict(checkpoint_state(best_checkpoint), strict=True)
@@ -369,12 +378,18 @@ def main():
     device = resolve_device(args.device)
     print("Device:", device)
     print("Compression rate:", compress_rate)
+    load_dotenv(args.env_file or None)
+    wandb_enabled = (not args.no_wandb) and bool(os.environ.get("WANDB_API_KEY"))
     run_name = args.wandb_run_name or os.path.basename(args.output_dir.rstrip("/"))
     wandb_run = init_wandb(
-        args.wandb, vars(args), args.wandb_project or "prune-one-stage",
+        wandb_enabled, vars(args), args.wandb_project or "resnet56-cifar10-norton",
         run_name, env_file=args.env_file, group=args.wandb_group,
         job_type="norton-resnet56-cifar10",
     )
+    if wandb_run:
+        wandb_run.define_metric("phase_epoch")
+        for prefix in ("dense", "decomposed", "pruned"):
+            wandb_run.define_metric(f"{prefix}/*", step_metric="phase_epoch")
 
     train_loader, val_loader = make_cifar10_loaders(
         args.data_path, args.batch_size, args.workers,
@@ -398,11 +413,14 @@ def main():
         dense, dense_path, _ = finetune_phase(
             dense, train_loader, val_loader, criterion, device, args,
             args.dense_epochs, "dense", "dense training", wandb_run,
+            short_tag="dense",
         )
         print(f"Trained dense checkpoint: {dense_path}")
     else:
         raise ValueError("Provide --dense-checkpoint or set --dense-epochs > 0")
     dense_metrics = evaluate(dense, val_loader, criterion, device)
+    dense_params = sum(p.numel() for p in dense.parameters())
+    print(f"Baseline (dense) | params={dense_params / 1e6:.3f}M | top1={dense_metrics['top1']:.2f}%")
     if wandb_run:
         wandb_run.log({f"dense/final/{key}": value for key, value in dense_metrics.items()})
 
@@ -424,7 +442,7 @@ def main():
     decomposed, decomposed_path, decomposed_top1 = finetune_phase(
         decomposed, train_loader, val_loader, criterion, device, args,
         args.decompose_finetune_epochs, "decomposed", "decomposition finetune",
-        wandb_run,
+        wandb_run, short_tag="decomp",
     )
 
     # Match the original two-script boundary: prune only a reloaded checkpoint.
@@ -436,7 +454,11 @@ def main():
     pruned = prune_cifar_resnet56(
         decomposed, compress_rate, criterion=args.criterion, copy_bn=args.copy_bn
     )
-    pruned_init_metrics = evaluate(pruned, val_loader, criterion, device)
+    pruned_init_metrics = evaluate(pruned, val_loader, criterion, device, verbose=False)
+    pruned_params = sum(p.numel() for p in pruned.parameters())
+    reduction = (1.0 - pruned_params / dense_params) * 100.0
+    print(f"\nPruned | params={pruned_params / 1e6:.3f}M (-{reduction:.1f}%) | "
+          f"acc truoc finetune={pruned_init_metrics['top1']:.2f}%")
     if wandb_run:
         wandb_run.log({
             f"pruned/init/{key}": value
@@ -449,7 +471,7 @@ def main():
     pruned, final_path, final_top1 = finetune_phase(
         pruned, train_loader, val_loader, criterion, device, args,
         args.prune_finetune_epochs, "model", "post-pruning finetune",
-        wandb_run, "pruned",
+        wandb_run, "pruned", short_tag="ft",
     )
     final_metrics = evaluate(pruned, val_loader, criterion, device)
     if wandb_run:
@@ -469,6 +491,7 @@ def main():
         "decomposed_checkpoint": decomposed_path,
         "final_checkpoint": final_path,
     }
+    profiles = None
     if not args.skip_profile:
         print("\n=== Complexity and latency (batch=1) ===")
         profiles = {
@@ -496,10 +519,22 @@ def main():
     print(f"\nFinal checkpoint: {final_path}")
     print(f"Results: {results_path}")
     if wandb_run:
+        wandb_run.summary["baseline_top1"] = dense_metrics["top1"]
         wandb_run.summary["final_top1"] = final_metrics["top1"]
         wandb_run.summary["final_top5"] = final_metrics["top5"]
         wandb_run.summary["final_checkpoint"] = final_path
         wandb_run.summary["results_path"] = results_path
+        if os.path.exists(final_path):
+            wandb_run.save(final_path)   # chi upload best cuoi cung (pruned finetune)
+        if not args.skip_profile:
+            dprof, fprof = profiles["dense"], profiles["final"]
+            wandb_run.summary["pruned_params_M"] = fprof["params"] / 1e6
+            wandb_run.summary["params_reduction_pct"] = (
+                1.0 - fprof["params"] / dprof["params"]) * 100.0
+            if dprof["macs"] and fprof["macs"]:
+                wandb_run.summary["pruned_macs_M"] = fprof["macs"] / 1e6
+                wandb_run.summary["macs_reduction_pct"] = (
+                    1.0 - fprof["macs"] / dprof["macs"]) * 100.0
         wandb_run.finish()
 
 
