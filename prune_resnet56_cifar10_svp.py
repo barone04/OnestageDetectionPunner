@@ -44,7 +44,11 @@ from torch.utils.data.dataloader import default_collate
 import torchvision
 import torchvision.transforms as T
 
-from pruning.svp import compute_singular_values, find_optimal_channels_gam
+from pruning.svp import (
+    compute_singular_values,
+    find_optimal_channels_gam,
+    select_filters_gem_by_nuclear_norm,
+)
 
 
 # ===========================================================================
@@ -75,10 +79,10 @@ def adapt_channel(compress_rates, layers):
         raise ValueError("Unsupported number of stages. Expected 3 or 4.")
 
     stage_oup_cprate = [compress_rates[0]]
-    for i in range(len(layers)):
+    for i in range(len(layers) - 1):            # chi stage 1..n-1; stage cuoi ep giu full
         stage_oup_cprate += [compress_rates[i + 1]] * layers[i]
-    stage_oup_cprate += [0.0] * layers[-1]
-    mid_cprate = compress_rates[1:]
+    stage_oup_cprate += [0.0] * layers[-1]      # stage cuoi (feed fc) KHONG prune
+    mid_cprate = compress_rates[len(layers):]   # tach sach stage-out vs mid (27 mid)
 
     overall_channel = []
     mid_channel = []
@@ -411,42 +415,106 @@ def _load_pretrained_baseline(pretrain_path, num_classes, device):
     return origin
 
 
-def _block_mid_convs(model):
-    """List conv1 (mid conv) cua tung block, thu tu layer1..layer3 (27 conv)."""
-    convs = []
+def _all_prunable_convs(model):
+    """(conv1 mid + conv2 output) moi block, thu tu layer1..3 (54 conv)."""
+    out = []
     for layer in (model.layer1, model.layer2, model.layer3):
         for block in layer:
-            convs.append(block.conv1)
-    return convs
+            out.append(block.conv1)   # mid
+            out.append(block.conv2)   # output (residual)
+    return out
 
 
-def compute_compress_rate_gam(model, target_rate):
+def compute_gam_compress_rate(model, target_rate, layers=(9, 9, 9)):
     """
-    Chay GAM tren mid-conv (conv1) cua tung block -> so kenh mid giu lai per-block.
-
-    Args:
-        model: full resnet56 baseline (da load pretrained).
-        target_rate: global compress rate (ti le kenh mid BI CAT).
-
-    Returns:
-        (keep list = so kenh mid giu per-block, orig_channels list)
-        -> dung THANG keep lam mid_channel_override khi build pruned model
-           (KHONG qua compress_rate broadcast loi cua adapt_channel).
+    HUONG B: GAM tren CA 54 conv (mid conv1 + output conv2), global budget ->
+    keep count/conv. Tra compress_rate vector 30-value cho adapt_channel:
+        [stem=0, stage1_out, stage2_out, mid_1..mid_27].
+    - Mid: per-block keep.
+    - Residual (conv2 output): gom PER-STAGE (mean) — Option-A bat cac block cung
+      stage cung so kenh out. Stage cuoi giu full (adapt_channel ep [0.]*9, feed fc).
     """
-    mid_convs = _block_mid_convs(model)  # 27 conv (mid)
-    weights = [c.weight.data.detach().cpu() for c in mid_convs]
+    convs = _all_prunable_convs(model)                 # 54
+    weights = [c.weight.data.detach().cpu() for c in convs]
+    sv = [compute_singular_values(w) for w in weights]
+    orig = [w.size(0) for w in weights]
+    total_keep = int((1.0 - target_rate) * int(np.sum(orig)))
+    total_keep = max(total_keep, len(convs))           # >=1 kenh/conv
+    keep = find_optimal_channels_gam(sv, total_keep, orig)
 
-    singular_values = [compute_singular_values(w) for w in weights]
-    original_channels = [w.size(0) for w in weights]
+    stage_w = [16, 32, 64]
+    nblk = list(layers)
+    mid_keep, out_keep = [], [[], [], []]
+    idx = 0
+    for s in range(3):
+        for _ in range(nblk[s]):
+            mid_keep.append(keep[idx]); idx += 1        # conv1
+            out_keep[s].append(keep[idx]); idx += 1     # conv2
 
-    total_channels = int(np.sum(original_channels))
-    total_to_keep = int((1.0 - target_rate) * total_channels)
-    total_to_keep = max(total_to_keep, len(mid_convs))  # >=1 kenh/layer
+    cpr = [0.0]                                         # stem giu full
+    for s in range(2):                                  # stage1, stage2 output rate (mean)
+        avg = max(1, min(int(round(np.mean(out_keep[s]))), stage_w[s]))
+        cpr.append(1.0 - avg / stage_w[s])
+    b = 0
+    for s in range(3):                                  # 27 mid rate per-block
+        for _ in range(nblk[s]):
+            k = max(1, min(mid_keep[b], stage_w[s]))
+            cpr.append(1.0 - k / stage_w[s])
+            b += 1
+    return cpr
 
-    keep = find_optimal_channels_gam(
-        singular_values, total_to_keep, original_channels
-    )
-    return keep, original_channels
+
+def _copy_bn(sd, ori, bn_name, out_idx):
+    """Copy BN sliced theo out_idx (giu lai) neu prune, full neu None. (mirror CORING)."""
+    for suf in (".weight", ".bias", ".running_mean", ".running_var"):
+        key = bn_name + suf
+        if key in ori:
+            sd[key] = ori[key][out_idx] if out_idx is not None else ori[key]
+    nbt = bn_name + ".num_batches_tracked"
+    if nbt in ori:
+        sd[nbt] = ori[nbt]
+
+
+@torch.no_grad()
+def copy_pruned_weights_gem(model, dense_sd, copy_bn=True):
+    """
+    HUONG B surgery: copy weight tu dense vao pruned, chon filter bang GEM
+    (nuclear norm, Algorithm 2). Mirror CORING load_resnet56_pruned (coring_rank
+    -> GEM); propagate input-slicing; residual positional add.
+    """
+    sd = model.state_dict()
+    last_select = None
+    for layer in range(3):
+        for k in range(9):
+            for l in range(2):
+                w = f"layer{layer+1}.{k}.conv{l+1}.weight"
+                bn = f"layer{layer+1}.{k}.bn{l+1}"
+                ori, cur = dense_sd[w], sd[w]
+                out_idx = None
+                if ori.size(0) != cur.size(0):          # output bi cat -> GEM chon filter
+                    mask = select_filters_gem_by_nuclear_norm(ori, cur.size(0))
+                    select = torch.nonzero(mask, as_tuple=False).flatten().sort().values
+                    src = ori[select]
+                    if last_select is not None:
+                        src = src[:, last_select]
+                    sd[w] = src
+                    last_select = select
+                    out_idx = select
+                elif last_select is not None:           # chi input bi cat
+                    sd[w] = ori[:, last_select]
+                    last_select = None
+                else:
+                    sd[w] = ori
+                    last_select = None
+                if copy_bn:
+                    _copy_bn(sd, dense_sd, bn, out_idx)
+    # stem + fc: khong cat -> copy full
+    sd["conv1.weight"] = dense_sd["conv1.weight"]
+    if copy_bn:
+        _copy_bn(sd, dense_sd, "bn1", None)
+    sd["fc.weight"] = dense_sd["fc.weight"]
+    sd["fc.bias"] = dense_sd["fc.bias"]
+    model.load_state_dict(sd)
 
 
 def measure_macs_params(model, device, input_size=(1, 3, 32, 32)):
@@ -520,12 +588,13 @@ def _load_dotenv(path=".env"):
 def main():
     _load_dotenv()   # tu nap .env -> tu bat wandb neu co WANDB_API_KEY (khong can dan tay)
     ap = argparse.ArgumentParser(
-        description="SVP/SLIMING rebuild — prune ResNet-56/CIFAR-10 (GAM + train-from-scratch)"
+        description="SVP/SLIMING rebuild HUONG B — prune ResNet-56/CIFAR-10 "
+                    "(GAM count + GEM filter-select + copy weight + finetune; mid + residual)"
     )
     ap.add_argument("--pretrain", required=True,
-                    help="resnet_56.pt (baseline ~93.26%%) — CHI de tinh GAM singular values")
+                    help="cifar10_resnet56_*.pt (Option-A dense ~93.26%%) — GAM + GEM + copy weight")
     ap.add_argument("--target-rate", default=0.5, type=float,
-                    help="global compress rate (ti le kenh mid bi cat). Default 0.5")
+                    help="global compress rate (ti le kenh BI CAT tren ca mid + residual). Default 0.5")
     ap.add_argument("--num-classes", default=10, type=int)
     # Hyperparams train-from-scratch DUNG SVP (paper Table 2 + code)
     ap.add_argument("--epochs", default=300, type=int)
@@ -564,28 +633,27 @@ def main():
     # Do MACs/Params baseline (dense) truoc khi prune.
     macs0, thop_p0 = measure_macs_params(origin, device)
 
-    keep, orig_ch = compute_compress_rate_gam(origin, args.target_rate)
-    kept, tot = sum(keep), sum(orig_ch)
-    print(f"[GAM] target_rate={args.target_rate:.3f} -> mid kept {kept}/{tot} "
-          f"({kept/tot*100:.1f}%) across {len(keep)} blocks")
-    print(f"[GAM] mid_channel_override (keep per-block): {keep}")
+    # --- HUONG B: GAM (mid + residual) -> compress_rate vector ---
+    cpr = compute_gam_compress_rate(origin, args.target_rate)
+    print(f"[GAM] target_rate={args.target_rate:.3f} -> compress_rate 30-value:")
+    print(f"      stem={cpr[0]:.2f} stage1_out={cpr[1]:.2f} stage2_out={cpr[2]:.2f} "
+          f"| mid(27)={[round(r, 2) for r in cpr[3:]]}")
 
-    del origin  # KHONG copy weight — giai phong baseline
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-
-    # --- 2) Build pruned resnet56 FRESH init & TRAIN FROM SCRATCH ---
-    # MID-ONLY residual-safe: overall_channel = full, chi doi mid_channel = keep
-    # (GAM). compress_rate placeholder [0.]*100 khong dung khi co override.
-    # SVP released trains from scratch; GEM (pruning/svp.py) chi dung khi copy+finetune
-    # -> KHONG dung o day de bam code goc.
-    net = resnet56(
-        [0.0] * 100, num_classes=args.num_classes, mid_channel_override=keep,
-    ).to(device)
+    # --- 2) Build pruned resnet56 (compress_rate) + GEM surgery COPY weight ---
+    # HUONG B (bam paper): GAM chon SO LUONG -> GEM chon FILTER nao giu -> copy
+    # weight tu dense -> FINETUNE (khong train-from-scratch). Prune ca mid + residual.
+    net = resnet56(cpr, num_classes=args.num_classes).to(device)
     p1 = params_count(net)
     reduction = (1 - p1 / p0) * 100
-    print(f"Pruned ResNet-56 (fresh init) | params={p1/1e6:.3f}M "
-          f"(-{reduction:.1f}% vs baseline {p0/1e6:.3f}M)")
+    print(f"Pruned ResNet-56 | params={p1/1e6:.3f}M (-{reduction:.1f}% vs {p0/1e6:.3f}M)")
+
+    # GEM chon filter + copy weight tu dense (mirror CORING surgery)
+    copy_pruned_weights_gem(net, {k: v.detach().clone() for k, v in origin.state_dict().items()})
+    ft_acc, _ = validate(net, val_loader, device)
+    print(f"[GEM surgery] acc sau copy (truoc finetune) = {ft_acc:.2f}%")
+    del origin
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     # Do MACs/Params pruned + in % giam (dose --target-rate toi ~58% MACs, paper Table 4).
     macs1, thop_p1 = measure_macs_params(net, device)
@@ -652,7 +720,7 @@ def main():
         if acc > best:
             best = acc
             torch.save({"state_dict": net.state_dict(), "acc": best,
-                        "mid_channels": keep}, save_path)
+                        "compress_rate": cpr}, save_path)
         lr = optimizer.param_groups[0]["lr"]
         if wb is not None:
             wb.log({"train_loss": train_loss, "val_acc": acc, "best_acc": best,
