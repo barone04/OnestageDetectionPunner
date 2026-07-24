@@ -64,7 +64,9 @@ def init_wandb(enabled, config, default_project, run_name, env_file="",
         # before init instead of relying on the SDK's implicit login path.
         wandb.login(key=api_key)
 
-    project = os.environ.get("WANDB_PROJECT", default_project)
+    # Project script truyen vao THANG env WANDB_PROJECT (moi script -> project rieng);
+    # chi dung env khi script khong chi dinh (default_project rong).
+    project = default_project or os.environ.get("WANDB_PROJECT", "prune-one-stage")
     kwargs = {
         "project": project,
         "name": run_name,
