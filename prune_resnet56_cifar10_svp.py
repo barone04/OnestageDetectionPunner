@@ -357,24 +357,35 @@ def get_mixupcutmix(mixup_alpha, cutmix_alpha, num_classes):
 #            ToTensor, Normalize, Resize(32, antialias=True), RandomErasing(0.1).
 #   - Test:  ToTensor, Normalize, Resize(32, antialias=True).
 # ===========================================================================
-def cifar10_loaders(data_dir, batch_size, num_classes, workers=4):
-    """PAPER Table 2 recipe: RandomCrop(32,pad4) + HorizontalFlip + CIFAR stats.
-    KHONG mixup/cutmix/TrivialAug/RandomErasing (paper CIFAR chi crop+flip)."""
+def cifar10_loaders(data_dir, batch_size, num_classes, mixup_alpha, cutmix_alpha, workers=4):
+    """FULL CODE recipe (svp-main/data.py) de REPRODUCE: TrivialAugmentWide +
+    RandomErasing + mixup/cutmix trong collate. GIU CIFAR stats (khop dense
+    Option-A 93.26 -> base_acc dung; SVP code dung ImageNet stats vi dense cua ho
+    train ImageNet-stats, con dense cua ta la CIFAR-stats)."""
     mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
     normalize = T.Normalize(mean, std)
     tr_tf = T.Compose([
-        T.RandomCrop(32, padding=4),
         T.RandomHorizontalFlip(),
+        T.RandomCrop(32, padding=4),
+        T.TrivialAugmentWide(),
         T.ToTensor(),
         normalize,
+        T.Resize(32, antialias=True),
+        T.RandomErasing(0.1),
     ])
-    te_tf = T.Compose([T.ToTensor(), normalize])
+    te_tf = T.Compose([T.ToTensor(), normalize, T.Resize(32, antialias=True)])
     tvdset = torchvision.datasets.CIFAR10 if num_classes == 10 else torchvision.datasets.CIFAR100
     tr = tvdset(root=data_dir, train=True, download=True, transform=tr_tf)
     te = tvdset(root=data_dir, train=False, download=True, transform=te_tf)
+
+    mixupcutmix = get_mixupcutmix(mixup_alpha, cutmix_alpha, num_classes)
+
+    def collate_fn(batch):
+        return mixupcutmix(*default_collate(batch))
+
     train_loader = DataLoader(
         tr, batch_size=batch_size, shuffle=True, num_workers=workers,
-        drop_last=True, pin_memory=True,
+        drop_last=True, pin_memory=True, collate_fn=collate_fn,
     )
     test_loader = DataLoader(
         te, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True,
@@ -579,18 +590,17 @@ def main():
     )
     ap.add_argument("--pretrain", required=True,
                     help="cifar10_resnet56_*.pt (Option-A dense ~93.26%%) — GAM + GEM + copy weight")
-    ap.add_argument("--target-rate", default=0.5, type=float,
-                    help="global compress rate (ti le kenh BI CAT tren ca mid + residual). Default 0.5")
+    ap.add_argument("--target-rate", default=0.40, type=float,
+                    help="global compress rate. 0.40 -> ~59%% MACs (sat 58%% cua paper). Run cu 0.5=67%% MACs")
     ap.add_argument("--num-classes", default=10, type=int)
-    # Hyperparams DUNG PAPER Table 2 (CIFAR-10, Algorithm 3 finetune):
-    #   E=300, lr=0.1, B=128, SGD m=0.9, wd=0.005, CosineAnnealingLR.
-    # Paper KHAC code train.py: augment DON GIAN (crop+flip, KHONG mixup/cutmix/
-    # TrivialAug) -> wd 0.005 hop ly. Tron augment-nang(code) + wd-cao(paper) = underfit.
-    ap.add_argument("--epochs", default=300, type=int)
-    ap.add_argument("--lr", default=0.1, type=float)
-    ap.add_argument("--batch-size", default=128, type=int)
+    # Hyperparams DUNG CODE svp-main/train.py (de REPRODUCE, KHONG phai Table 2):
+    #   E=600, lr=0.5, B=256, SGD m=0.9, wd=2e-5 + augment nang (mixup/cutmix/
+    #   TrivialAug/RandomErasing). augment nang di CUNG wd thap (2e-5) moi dung.
+    ap.add_argument("--epochs", default=600, type=int)
+    ap.add_argument("--lr", default=0.5, type=float)
+    ap.add_argument("--batch-size", default=256, type=int)
     ap.add_argument("--momentum", default=0.9, type=float)
-    ap.add_argument("--weight-decay", default=0.005, type=float)
+    ap.add_argument("--weight-decay", default=2e-5, type=float)
     ap.add_argument("--label-smoothing", default=0.1, type=float)
     ap.add_argument("--mixup-alpha", default=0.2, type=float)
     ap.add_argument("--cutmix-alpha", default=1.0, type=float)
@@ -609,7 +619,8 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     train_loader, val_loader = cifar10_loaders(
-        args.data_dir, args.batch_size, args.num_classes, args.workers,
+        args.data_dir, args.batch_size, args.num_classes,
+        args.mixup_alpha, args.cutmix_alpha, args.workers,
     )
 
     # --- 1) Baseline pretrained CHI de tinh GAM config (KHONG copy weight) ---
@@ -689,15 +700,15 @@ def main():
 
     best = 0.0
     save_path = os.path.join(args.output_dir, "model_best.pth")
-    criterion = nn.CrossEntropyLoss()   # plain CE (paper CIFAR: khong label smoothing/mixup)
     net.train()
     for ep in range(args.epochs):
         loss_sum = n = 0
         for x, y in train_loader:
+            # mixup/cutmix tra soft target (one-hot mix) qua collate_fn.
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad(set_to_none=True)
             out = net(x)
-            loss = criterion(out, y)
+            loss = soft_cross_entropy(out, y, args.label_smoothing)
             loss.backward()
             optimizer.step()
             scheduler.step()  # PER-ITERATION (khop SVP train.py)
