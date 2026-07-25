@@ -268,21 +268,11 @@ def finetune_phase(model, train_loader, val_loader, criterion, device, args,
     scheduler = make_scheduler(
         optimizer, epochs, args.lr_warmup_epochs, args.lr_warmup_decay
     )
-    log_prefix = metric_prefix or stem
     best_path = os.path.join(args.output_dir, f"{stem}_best.pth")
     last_path = os.path.join(args.output_dir, f"{stem}_last.pth")
     initial = evaluate(model, val_loader, criterion, device, verbose=False)
     best_top1 = initial["top1"]
     save_checkpoint(best_path, model, optimizer, -1, best_top1, stage)
-    if wandb_run:
-        wandb_run.log({
-            "phase": log_prefix,
-            "phase_epoch": -1,
-            f"{log_prefix}/val/loss": initial["loss"],
-            f"{log_prefix}/val/top1": initial["top1"],
-            f"{log_prefix}/val/top5": initial["top5"],
-            f"{log_prefix}/best_top1": best_top1,
-        })
 
     print(f"\n=== {stage}: {epochs} epochs ===")
     for epoch in range(epochs):
@@ -296,21 +286,13 @@ def finetune_phase(model, train_loader, val_loader, criterion, device, args,
         if improved:
             best_top1 = val_metrics["top1"]
         if wandb_run:
-            log = {
-                "phase": log_prefix,
-                "phase_epoch": epoch,
-                f"{log_prefix}/lr": optimizer.param_groups[0]["lr"],
-                f"{log_prefix}/best_top1": best_top1,
-            }
-            log.update({
-                f"{log_prefix}/train/{key}": value
-                for key, value in train_metrics.items()
+            wandb_run.log({
+                "train_loss": train_metrics["loss"],
+                "val_acc": val_metrics["top1"],
+                "best_acc": best_top1,
+                "val_loss": val_metrics["loss"],
+                "lr": optimizer.param_groups[0]["lr"],
             })
-            log.update({
-                f"{log_prefix}/val/{key}": value
-                for key, value in val_metrics.items()
-            })
-            wandb_run.log(log)
         save_checkpoint(last_path, model, optimizer, epoch, val_metrics["top1"], stage)
         if improved:
             save_checkpoint(best_path, model, optimizer, epoch, best_top1, stage)
@@ -322,8 +304,6 @@ def finetune_phase(model, train_loader, val_loader, criterion, device, args,
     best_checkpoint = load_checkpoint(best_path)
     model.load_state_dict(checkpoint_state(best_checkpoint), strict=True)
     print(f"Reloaded best {stage}: {best_path}")
-    if wandb_run:
-        wandb_run.summary[f"{log_prefix}/best_top1"] = best_top1
     return model, best_path, best_top1
 
 
@@ -386,10 +366,6 @@ def main():
         run_name, env_file=args.env_file, group=args.wandb_group,
         job_type="norton-resnet56-cifar10",
     )
-    if wandb_run:
-        wandb_run.define_metric("phase_epoch")
-        for prefix in ("dense", "decomposed", "pruned"):
-            wandb_run.define_metric(f"{prefix}/*", step_metric="phase_epoch")
 
     train_loader, val_loader = make_cifar10_loaders(
         args.data_path, args.batch_size, args.workers,
@@ -421,8 +397,6 @@ def main():
     dense_metrics = evaluate(dense, val_loader, criterion, device)
     dense_params = sum(p.numel() for p in dense.parameters())
     print(f"Baseline (dense) | params={dense_params / 1e6:.3f}M | top1={dense_metrics['top1']:.2f}%")
-    if wandb_run:
-        wandb_run.log({f"dense/final/{key}": value for key, value in dense_metrics.items()})
 
     decomposed, replaced = decompose_cifar_resnet56(
         dense, args.rank, args.n_iter_max, args.n_iter_singular_error
@@ -430,11 +404,6 @@ def main():
     decomposed = decomposed.to(device)
     print(f"Decomposed 3x3 convolutions: {replaced}")
     decomposed_init_metrics = evaluate(decomposed, val_loader, criterion, device)
-    if wandb_run:
-        wandb_run.log({
-            f"decomposed/init/{key}": value
-            for key, value in decomposed_init_metrics.items()
-        })
     save_checkpoint(
         os.path.join(args.output_dir, "decomposed_init.pth"),
         decomposed, None, -1, decomposed_init_metrics["top1"], "decomposed init",
@@ -459,11 +428,6 @@ def main():
     reduction = (1.0 - pruned_params / dense_params) * 100.0
     print(f"\nPruned | params={pruned_params / 1e6:.3f}M (-{reduction:.1f}%) | "
           f"acc truoc finetune={pruned_init_metrics['top1']:.2f}%")
-    if wandb_run:
-        wandb_run.log({
-            f"pruned/init/{key}": value
-            for key, value in pruned_init_metrics.items()
-        })
     save_checkpoint(
         os.path.join(args.output_dir, "pruned_init.pth"),
         pruned, None, -1, pruned_init_metrics["top1"], "pruned init",
@@ -474,10 +438,6 @@ def main():
         wandb_run, "pruned", short_tag="ft",
     )
     final_metrics = evaluate(pruned, val_loader, criterion, device)
-    if wandb_run:
-        wandb_run.log({
-            f"pruned/final/{key}": value for key, value in final_metrics.items()
-        })
 
     results = {
         "config": vars(args),
@@ -505,13 +465,6 @@ def main():
         print_profile("Dense", dense_metrics, profiles["dense"])
         print_profile("Decomposed", {"top1": decomposed_top1}, profiles["decomposed"])
         print_profile("Final", final_metrics, profiles["final"])
-        if wandb_run:
-            profile_log = {}
-            for model_name, profile in profiles.items():
-                for key, value in profile.items():
-                    if value is not None:
-                        profile_log[f"profile/{model_name}/{key}"] = value
-            wandb_run.log(profile_log)
 
     results_path = os.path.join(args.output_dir, "results.json")
     with open(results_path, "w") as file:
@@ -519,9 +472,8 @@ def main():
     print(f"\nFinal checkpoint: {final_path}")
     print(f"Results: {results_path}")
     if wandb_run:
-        wandb_run.summary["baseline_top1"] = dense_metrics["top1"]
-        wandb_run.summary["final_top1"] = final_metrics["top1"]
-        wandb_run.summary["final_top5"] = final_metrics["top5"]
+        wandb_run.summary["baseline_acc"] = dense_metrics["top1"]
+        wandb_run.summary["final_acc"] = final_metrics["top1"]
         wandb_run.summary["final_checkpoint"] = final_path
         wandb_run.summary["results_path"] = results_path
         if os.path.exists(final_path):
