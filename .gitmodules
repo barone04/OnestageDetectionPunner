@@ -1,0 +1,7 @@
+[submodule "PrunedFishNet"]
+    path = PrunedFishNet
+    url = https://github.com/barone04/PrunedFishNet.git
+
+[submodule "YOLOv1"]
+    path = YOLOv1
+    url = https://github.com/pjh5672/YOLOv1.git
