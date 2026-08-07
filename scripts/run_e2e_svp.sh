@@ -46,14 +46,15 @@ $PY train.py --data-path $DATA --backbone $BACKBONE --num-classes $NUM_CLASSES \
     --input-size $INPUT --epochs $DENSE_EPOCHS --batch-size $BATCH --workers $WORKERS \
     --device $DEVICE --augment $WANDB_ARG $PRET_ARG --output-dir $OUT/step1_dense
 
-echo "[Step 2/4] SVP-GAM config (Huong A: khong GEM, khong copy weight) ..."
+echo "[Step 2/4] SVP prune (Huong B: GAM + GEM chon filter + COPY weight) ..."
 $PY prune_svp.py --checkpoint $OUT/step1_dense/model_best.pth \
     --target-rate $TARGET_RATE --scope $SCOPE --device $DEVICE \
     --output-dir $OUT/step2_svp
 
-echo "[Step 3/4] Train LEAN FROM SCRATCH (Huong A: KHONG --weights -> fresh init) ..."
+echo "[Step 3/4] FINETUNE LEAN (Huong B: --weights = weight copy tu dense) ..."
 $PY train.py --data-path $DATA --num-classes $NUM_CLASSES --input-size $INPUT \
     --init-config $OUT/step2_svp/model_lean.json \
+    --weights $OUT/step2_svp/model_lean.pth \
     --epochs $FINAL_EPOCHS --batch-size $BATCH --workers $WORKERS \
     --device $DEVICE --augment $WANDB_ARG --output-dir $OUT/step3_final
 

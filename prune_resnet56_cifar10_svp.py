@@ -1,33 +1,26 @@
 """
-prune_resnet56_cifar10_svp.py — Rebuild TRUNG THANH pipeline SLIMING / SVP-main
-cho ResNet-56 / CIFAR-10, theo DUNG code released (TRAIN-FROM-SCRATCH).
+prune_resnet56_cifar10_svp.py — SLIMING/SVP tren ResNet-56/CIFAR-10 — HUONG B
+(bam Paper Algorithm 3: GAM count + GEM filter-select + COPY weight + FINETUNE).
 
-Y tuong (bam sat SVP-main):
-  1. Load pretrained ResNet-56 (baseline ~93.26%, file resnet_56.pt) CHI de tinh
-     singular values cua tung mid-conv (conv1 moi block) prunable (KHONG copy weight).
-  2. GAM (Greedy Addition Method) phan bo global so kenh MID giu lai theo --target-rate
-     -> ra so kenh mid per-block. SVP KHONG release mapping ResNet (adapt_channel
-     format chong index) -> ta build MID-ONLY residual-safe qua mid_channel_override
-     (overall_channel giu = full, downsample/residual an toan), do MACs (thop) de dose.
-  3. Build pruned resnet56 FRESH init (kaiming) va TRAIN FROM SCRATCH.
-     -> SVP released trains from scratch; GEM (pruning/svp.py::select_filters_gem_*)
-        chi dung khi copy+finetune — KHONG dung o day de bam code goc.
+Y tuong:
+  1. Load dense ResNet-56 Option-A (baseline ~93.26%, cifar10_resnet56_*.pt).
+  2. GAM (Greedy Addition Method) tren 54 conv (mid conv1 + residual conv2) theo
+     --target-rate -> so kenh giu moi conv (mid per-block; residual gom per-stage;
+     stage cuoi giu full).
+  3. GEM (nuclear-norm, pruning/svp.py::select_filters_gem_by_nuclear_norm) chon
+     FILTER nao giu trong so GAM da chot.
+  4. COPY weight tu dense (copy_pruned_weights_gem, mirror CORING surgery) -> FINETUNE.
 
-Hyperparams train-from-scratch theo SVP (paper Table 2 + code train.py/utils.py):
-  epochs 300, lr 0.1, batch 128, SGD momentum 0.9, weight_decay 0.005,
-  label_smoothing 0.1, mixup_alpha 0.2, cutmix_alpha 1.0,
-  warmup 5 epoch LinearLR(start_factor=0.01) -> CosineAnnealingLR(eta_min=0),
-  STEP PER-ITERATION (khop SVP train.py eras).
+Model: ResNet-56 Option A (stem conv1/bn1, shortcut zero-pad KHONG param) de khop
+checkpoint SLIMING release + iso-baseline voi CORING/NORTON.
 
-Data: torchvision.datasets.CIFAR10(root=--data-dir, download=True) — giong SVP data.py,
-ap DUNG augment SVP data.py (ImageNet-stats Normalize + TrivialAugmentWide +
-RandomErasing + Resize32) va mixup/cutmix trong collate_fn (port tu SVP utils.py).
+Hyperparams DUNG code svp-main/train.py (de reproduce): epochs 600, lr 0.5, batch 256,
+SGD m=0.9, weight_decay 2e-5, label_smoothing 0.1, mixup 0.2, cutmix 1.0,
+warmup 5ep LinearLR -> CosineAnnealingLR, augment nang (TrivialAugmentWide +
+RandomErasing + mixup/cutmix). CIFAR stats (khop dense Option-A).
 
 Vi du:
-  python prune_resnet56_cifar10_svp.py --pretrain resnet_56.pt --target-rate 0.5 --wandb
-
-Import GAM tu pruning.svp (ban rebuild GAM cua minh):
-  from pruning.svp import compute_singular_values, find_optimal_channels_gam
+  python prune_resnet56_cifar10_svp.py --pretrain cifar10_resnet56_93.26.pt --target-rate 0.40
 """
 import os
 import math
