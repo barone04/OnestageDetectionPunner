@@ -12,6 +12,7 @@ their factors, then a smaller NORTON topology is rebuilt and sliced.
 """
 import os
 import json
+import time
 import argparse
 import random
 
@@ -364,9 +365,11 @@ def main():
                 "prune_layout": prune_layout,
             }, allow_val_change=True)
 
+    _t = time.perf_counter()
     model, replaced = decompose_yolo_model(
         dense, args.rank, args.scope, args.n_iter_max, args.n_iter_singular_error
     )
+    prune_secs = time.perf_counter() - _t   # prune wall-clock: CP-decompose
     model.to(device)
     print(f"NORTON rank={args.rank} scope={args.scope} | decomposed 3x3 layers={replaced}")
 
@@ -425,11 +428,14 @@ def main():
     model.load_state_dict(decomposed_ckpt["model"], strict=True)
     print(f"Pruning from trained decomposed checkpoint: {decomposed_best_path}")
 
+    _t = time.perf_counter()
     model, _ = prune_norton_model(
         model, args.prune_ratio, criterion=args.criterion, scope=args.scope,
         compress_rate=(compress_rates if args.compress_rate is not None else None),
         copy_bn=args.copy_bn,
     )
+    prune_secs += time.perf_counter() - _t   # + one-shot factor prune
+    print(f"[prune wall-clock] norton (decompose + prune, excl. finetune) = {prune_secs:.2f}s")
     pruned_weight, pruned_cfg_path = save_config_and_weights(
         model, args.output_dir, "model_norton_pruned"
     )
