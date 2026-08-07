@@ -16,6 +16,7 @@ Vi du:
 """
 import os
 import json
+import time
 import argparse
 
 import torch
@@ -102,6 +103,7 @@ def main():
     print(f"\nBaseline params={p0/1e6:.2f}M | scope={args.scope} | method=SVP (Huong B: GAM+GEM+copy)")
 
     # --- 1) GAM: so kenh giu moi layer ---
+    t_prune = time.perf_counter()   # do prune wall-clock (GAM + GEM + surgery)
     print(f"\n=== SVP-GAM allocation | target_rate={args.target_rate:.3f} | budget={args.budget} ===")
     layers, channels_to_keep, compress_rates = svp_pruner.compute_allocation(
         args.target_rate, use_flops=(args.budget == "flops"))
@@ -118,6 +120,8 @@ def main():
     lean, lean_cfg = convert_to_lean(model, save_path=None)
     lean.to(device)
     p1 = sum(p.numel() for p in lean.parameters())
+    prune_secs = time.perf_counter() - t_prune
+    print(f"[prune wall-clock] SVP (GAM+GEM+surgery) = {prune_secs:.2f}s")
 
     # --- 3) Luu lean (CO weight copy) cho step 3 FINETUNE ---
     save_path = os.path.join(args.output_dir, "model_lean.pth")
