@@ -66,9 +66,40 @@ def get_args():
     p.add_argument("--nms-thresh", default=0.5, type=float)
     # wandb
     p.add_argument("--wandb", action="store_true", help="log len wandb")
+    p.add_argument("--wandb-project", default="",
+                   help="ten project wandb, vd yolov1_resnet18_bilevel_Deepfish")
+    p.add_argument("--dense-ref", default="",
+                   help="dense ckpt de log %MACs/%params reduction (summary)")
     p.add_argument("--map-train", action="store_true",
                    help="tinh ca mAP tren TRAIN (cham, chay full train set moi epoch)")
     return p.parse_args()
+
+
+@torch.no_grad()
+def count_macs(model, input_size):
+    """forward-hook MACs (shape-only): Conv2d + Linear."""
+    dev = next(model.parameters()).device
+    total = [0]
+    hooks = []
+    def ch(m, i, o):
+        _, _, H, W = o.shape
+        kh, kw = m.kernel_size
+        total[0] += (m.in_channels // m.groups) * m.out_channels * kh * kw * H * W
+    def lh(m, i, o):
+        total[0] += m.in_features * m.out_features
+    for mod in model.modules():
+        if isinstance(mod, torch.nn.Conv2d):
+            hooks.append(mod.register_forward_hook(ch))
+        elif isinstance(mod, torch.nn.Linear):
+            hooks.append(mod.register_forward_hook(lh))
+    was_training = model.training
+    model.eval()
+    model(torch.zeros(1, 3, input_size, input_size, device=dev))
+    for h in hooks:
+        h.remove()
+    if was_training:
+        model.train()
+    return total[0]
 
 
 def save_ckpt(path, model, optimizer, epoch, val_loss, metric):
@@ -90,8 +121,9 @@ def main():
 
     wandb = None
     if args.wandb:
-        import wandb  # env WANDB_API_KEY/PROJECT/ENTITY tu lo (vd da set tren FPT)
-        wandb.init(name=os.path.basename(args.output_dir.rstrip("/")), config=vars(args))
+        import wandb  # env WANDB_API_KEY/ENTITY tu lo (vd da set tren FPT)
+        wandb.init(project=(args.wandb_project or None),
+                   name=os.path.basename(args.output_dir.rstrip("/")), config=vars(args))
 
     train_ds = YoloDataset(args.data_path, "train", args.input_size, augment=args.augment)
     val_ds = YoloDataset(args.data_path, "val", args.input_size, augment=False)
@@ -137,6 +169,21 @@ def main():
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model {args.backbone} | params={n_params/1e6:.2f}M | grid={model.grid_size}")
+
+    # --- log %MACs/%params reduction (summary) khi co dense ref ---
+    if wandb and args.dense_ref and os.path.isfile(args.dense_ref):
+        dref = torch.load(args.dense_ref, map_location="cpu", weights_only=False)
+        dmodel = build_model(dref["config"])
+        dmodel.load_state_dict(dref["model"])
+        d_p, d_m = sum(p.numel() for p in dmodel.parameters()), count_macs(dmodel, args.input_size)
+        l_m = count_macs(model, args.input_size)
+        wandb.run.summary.update({
+            "pruned_params_M": n_params / 1e6,
+            "params_reduction_pct": (1 - n_params / d_p) * 100,
+            "pruned_macs_M": l_m / 1e6,
+            "macs_reduction_pct": (1 - l_m / d_m) * 100,
+        })
+        print(f"[reduction] MACs -{(1 - l_m / d_m) * 100:.1f}%  params -{(1 - n_params / d_p) * 100:.1f}%")
 
     best = float("-inf")
     for epoch in range(start_epoch, args.epochs):
