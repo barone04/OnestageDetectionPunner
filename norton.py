@@ -195,7 +195,7 @@ def make_grad_scaler(device):
 
 def finetune_phase(model, criterion, train_loader, val_loader, device, args,
                    epochs, checkpoint_stem, phase_name, wandb_run=None,
-                   metric_prefix=None):
+                   metric_prefix=None, epoch_offset=0):
     """Run one independent NORTON recovery phase and reload its best checkpoint."""
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr,
                                 momentum=args.momentum, weight_decay=args.weight_decay)
@@ -228,19 +228,6 @@ def finetune_phase(model, criterion, train_loader, val_loader, device, args,
         run_config=vars(args), stage=phase_name,
     )
     print(f"  Initial {phase_name} best ({initial_tag}={best:.4f})")
-    if wandb_run:
-        initial_log = {
-            "phase": log_prefix,
-            "phase_epoch": -1,
-            f"{log_prefix}/val/loss": initial_val["loss"],
-            f"{log_prefix}/best_metric": best,
-        }
-        if not args.no_map:
-            initial_log.update({
-                f"{log_prefix}/val/{key}": value
-                for key, value in initial_map.items()
-            })
-        wandb_run.log(initial_log)
 
     print(f"\n=== {phase_name}: {epochs} epochs ===")
 
@@ -267,24 +254,15 @@ def finetune_phase(model, criterion, train_loader, val_loader, device, args,
 
         if wandb_run:
             log = {
+                "epoch": epoch_offset + epoch,
                 "phase": log_prefix,
-                "phase_epoch": epoch,
-                f"{log_prefix}/lr": optimizer.param_groups[0]["lr"],
-                f"{log_prefix}/best_metric": max(best, metric) if metric is not None else best,
+                "lr": optimizer.param_groups[0]["lr"],
+                "best_metric": max(best, metric) if metric is not None else best,
             }
-            log.update({
-                f"{log_prefix}/train/{key}": value
-                for key, value in train_metrics.items()
-            })
-            log.update({
-                f"{log_prefix}/val/{key}": value
-                for key, value in val.items()
-            })
+            log.update({f"train/{key}": value for key, value in train_metrics.items()})
+            log.update({f"val/{key}": value for key, value in val.items()})
             if use_map:
-                log.update({
-                    f"{log_prefix}/val/{key}": value
-                    for key, value in result.items()
-                })
+                log.update({f"val/{key}": value for key, value in result.items()})
             wandb_run.log(log)
 
         save_ckpt(
@@ -322,14 +300,14 @@ def main():
     wandb_enabled = (not args.no_wandb) and bool(os.environ.get("WANDB_API_KEY"))
     run_name = args.wandb_run_name or os.path.basename(args.output_dir.rstrip("/"))
     wandb_run = init_wandb(
-        wandb_enabled, vars(args), args.wandb_project or "yolo-deepfish-norton",
+        wandb_enabled, vars(args), args.wandb_project or "yolov1_resnet18_norton_Deepfish",
         run_name, env_file=args.env_file, group=args.wandb_group,
         job_type="norton-yolo",
     )
     if wandb_run:
-        wandb_run.define_metric("phase_epoch")
-        for prefix in ("decomposed", "pruned"):
-            wandb_run.define_metric(f"{prefix}/*", step_metric="phase_epoch")
+        wandb_run.define_metric("epoch")
+        for m in ("train/*", "val/*", "lr", "best_metric"):
+            wandb_run.define_metric(m, step_metric="epoch")
 
     ckpt = load_checkpoint(args.checkpoint)
     if not isinstance(ckpt, dict) or "config" not in ckpt or "model" not in ckpt:
@@ -451,6 +429,7 @@ def main():
     model, final_path, final_best = finetune_phase(
         model, criterion, train_loader, val_loader, device, args,
         prune_epochs, "model", "post-pruning finetune", wandb_run, "pruned",
+        epoch_offset=decompose_epochs,
     )
     final_params, final_macs = profile_model(model, cfg["input_size"], device)
     params_drop = (1.0 - final_params / dense_params) * 100.0
