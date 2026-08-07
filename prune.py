@@ -18,6 +18,7 @@ Vi du:
 """
 import os
 import json
+import time
 import argparse
 
 import torch
@@ -68,7 +69,7 @@ def get_args():
                    help="bilevel = bai minh (Song Han + L1-inf-inf, mask); "
                         "coring = baseline (HOSVD+VBD+min_sum, k-shot surgery-first)")
     p.add_argument("--batch-size", default=16, type=int)
-    p.add_argument("--lr", default=5e-4, type=float)
+    p.add_argument("--lr", default=1e-3, type=float)   # ISO voi train.py finetune (truoc 5e-4)
     p.add_argument("--momentum", default=0.9, type=float)
     p.add_argument("--weight-decay", default=5e-4, type=float)
     p.add_argument("--workers", default=4, type=int)
@@ -123,6 +124,7 @@ def main():
     evaluate(model, criterion, val_loader, device)
     report_map("baseline", model)
 
+    prune_secs = 0.0   # prune wall-clock (thuat toan prune + surgery; KHONG tinh finetune)
     if args.method == "coring":
         # ===== CORING baseline: k-shot, cat -> SURGERY NGAY -> finetune model nho =====
         from pruning.coring import CoringPruner
@@ -133,8 +135,10 @@ def main():
             ratio = (target_abs - prev) / (1.0 - prev) if prev < 1.0 else 0.0  # ty le tren model HIEN TAI
             print(f"\n=== CORING shot {it+1}/{args.prune_iters} | "
                   f"target={target_abs:.3f} | ratio_on_cur={ratio:.3f} ===")
+            _t = time.perf_counter()
             CoringPruner(Scope(cur, args.scope)).prune(prune_ratio=ratio)
             cur, _ = convert_to_lean(cur)          # surgery ngay -> model nho hon
+            prune_secs += time.perf_counter() - _t
             cur.to(device)
             # calibrate finetune tren model nho (cung budget finetune_epochs/shot nhu bi-level)
             opt = torch.optim.SGD(cur.parameters(), lr=args.lr,
@@ -162,8 +166,10 @@ def main():
         for it in range(args.prune_iters):
             sparsity = args.target_sparsity * (it + 1) / args.prune_iters
             print(f"\n=== Prune iter {it+1}/{args.prune_iters} | sparsity={sparsity:.3f} ===")
+            _t = time.perf_counter()
             u_pruner.prune(sensitivity=args.sensitivity_mult * sparsity)
             s_pruner.prune(prune_ratio=sparsity)
+            prune_secs += time.perf_counter() - _t
             print(f"  Song Han global sparsity={u_pruner.global_sparsity():.3f}")
 
             for ep in range(args.finetune_epochs):
@@ -173,8 +179,12 @@ def main():
             evaluate(model, criterion, val_loader, device)
 
         print("\n=== Model Surgery ===")
+        _t = time.perf_counter()
         lean, _ = convert_to_lean(model)
+        prune_secs += time.perf_counter() - _t
         lean.to(device)
+
+    print(f"[prune wall-clock] {args.method} (thuat toan prune+surgery, excl. finetune) = {prune_secs:.2f}s")
 
     # --- luu lean + eval (chung cho ca 2 method) ---
     save_path = os.path.join(args.output_dir, "model_lean.pth")
