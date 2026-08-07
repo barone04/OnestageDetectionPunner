@@ -8,7 +8,15 @@
 - **Prune scope: MID-only** cả 4 method (stem + output block + downsample GIỮ; residual-safe).
 - **Hyperparam ISO** (mọi finetune, cả prune-time lẫn cuối): `--lr 1e-3 --weight-decay 5e-4 --momentum 0.9 --batch-size 16`, SGD + CosineAnnealingLR.
 - **Giữ theo gốc** (thuật toán): `--prune-iters`, `--rank`, `--criterion`, scheduler-lúc-prune. `--workers` tùy máy (không ảnh hưởng acc).
-- **Branch mỗi method** (checkout trước khi run): bi-level & CORING → `CORING` (`prune.py --method`); SVP → `Sliming` (`prune_svp.py`); NORTON → `NORTON` (`norton.py`). Chạy sai branch = thiếu driver/flag.
+- **Branch mỗi method** (checkout trước khi run):
+  | Method | Branch | Driver |
+  |---|---|---|
+  | bi-level (method đề xuất) | `main` | `prune.py` (thuần bi-level, KHÔNG có `--method`) |
+  | CORING | `CORING` | `prune.py --method coring` |
+  | SVP | `Sliming` | `prune_svp.py` |
+  | NORTON | `NORTON` | `norton.py` |
+
+  Chạy sai branch = thiếu driver/flag. (Lưu ý: branch `CORING` có `prune.py --method {bilevel,coring}` nhưng bilevel **chính thức** chạy ở `main`.)
 
 ```bash
 # Step1 dense (chung) — chay 1 lan
@@ -50,24 +58,25 @@ Dense YOLO resnet18/448 = **9.361G MACs / 21.93M params**. bi-level ≡ CORING (
 
 ---
 
-## bi-level (`prune.py --method bilevel`)
+## bi-level (branch `main` — `prune.py`, KHÔNG có `--method`)
 
 ```bash
 DENSE=./output/dense/model_best.pth
 S=0.50                       # {Nhẹ 0.37 | Vừa 0.50 | Nặng 0.64}
 
 # step2: prune + prune-time finetune (5x8 = 40 ep) | lr iso 1e-3 (override default 5e-4)
-python prune.py --method bilevel --checkpoint $DENSE --data-path ./NewDeepfish \
+python prune.py --checkpoint $DENSE --data-path ./NewDeepfish \
     --target-sparsity $S --prune-iters 5 --finetune-epochs 8 --scope all \
     --lr 1e-3 --weight-decay 5e-4 --momentum 0.9 --batch-size 16 \
     --output-dir ./output/bilevel/step2
 
-# step3: finetune cuoi 160 ep (recipe CHUNG iso)
+# step3: finetune cuoi 160 ep (recipe CHUNG iso) + wandb
 python train.py --data-path ./NewDeepfish --num-classes 1 --input-size 448 \
     --init-config ./output/bilevel/step2/model_lean.json \
     --weights     ./output/bilevel/step2/model_lean.pth \
-    --epochs 160 --lr 1e-3 --weight-decay 5e-4 --momentum 0.9 --batch-size 16 \
-    --augment --output-dir ./output/bilevel/step3
+    --epochs 160 --lr 1e-3 --weight-decay 5e-4 --momentum 0.9 --batch-size 16 --augment \
+    --wandb --wandb-project yolov1_resnet18_bilevel_Deepfish --dense-ref $DENSE \
+    --output-dir ./output/bilevel/step3
 ```
 
 ## CORING (`prune.py --method coring`)
@@ -86,8 +95,9 @@ python prune.py --method coring --checkpoint $DENSE --data-path ./NewDeepfish \
 python train.py --data-path ./NewDeepfish --num-classes 1 --input-size 448 \
     --init-config ./output/coring/step2/model_lean.json \
     --weights     ./output/coring/step2/model_lean.pth \
-    --epochs 160 --lr 1e-3 --weight-decay 5e-4 --momentum 0.9 --batch-size 16 \
-    --augment --output-dir ./output/coring/step3
+    --epochs 160 --lr 1e-3 --weight-decay 5e-4 --momentum 0.9 --batch-size 16 --augment \
+    --wandb --wandb-project yolov1_resnet18_coring_Deepfish --dense-ref $DENSE \
+    --output-dir ./output/coring/step3
 ```
 
 ## SVP / SLIMING (`prune_svp.py`)
@@ -104,8 +114,9 @@ python prune_svp.py --checkpoint $DENSE --target-rate $R --scope all \
 python train.py --data-path ./NewDeepfish --num-classes 1 --input-size 448 \
     --init-config ./output/svp/step2/model_lean.json \
     --weights     ./output/svp/step2/model_lean.pth \
-    --epochs 200 --lr 1e-3 --weight-decay 5e-4 --momentum 0.9 --batch-size 16 \
-    --augment --output-dir ./output/svp/step3
+    --epochs 200 --lr 1e-3 --weight-decay 5e-4 --momentum 0.9 --batch-size 16 --augment \
+    --wandb --wandb-project yolov1_resnet18_svp_Deepfish --dense-ref $DENSE \
+    --output-dir ./output/svp/step3
 ```
 
 ## NORTON (`norton.py`)
@@ -115,12 +126,24 @@ DENSE=./output/dense/model_best.pth
 PR=0.45                      # {Nhẹ 0.30 | Vừa 0.45 | Nặng 0.60}
 
 # decompose-ft (100) + prune-ft (100) — TRONG norton.py, khong co step3 rieng
+# wandb TU BAT neu co WANDB_API_KEY (tat bang --no-wandb); reductions tinh san trong norton.py (khong can --dense-ref)
 python norton.py --checkpoint $DENSE --data-path ./NewDeepfish \
     --rank 6 --prune-ratio $PR --criterion pabs --scope all \
     --decompose-finetune-epochs 100 --prune-finetune-epochs 100 \
     --lr 1e-3 --weight-decay 5e-4 --momentum 0.9 --batch-size 16 \
+    --wandb-project yolov1_resnet18_norton_Deepfish \
     --output-dir ./output/norton
 ```
+
+## wandb (mỗi method 1 project — đã gắn sẵn trong lệnh trên)
+
+Project theo method: `yolov1_resnet18_bilevel_Deepfish` · `..._coring_Deepfish` · `..._svp_Deepfish` · `..._norton_Deepfish`.
+
+**Trước khi chạy**: `export WANDB_API_KEY=<key>` (+ `WANDB_ENTITY=<team>` nếu là team). bi-level/CORING/SVP dùng `--wandb`; NORTON tự bật (tắt bằng `--no-wandb`).
+
+**Form log (phẳng, giống nhau mọi method):**
+- Per-epoch: `epoch`, `lr`, `train/{loss,obj,noobj,box,cls}`, `val/{loss,obj,noobj,box,cls}`, `val/mAP@0.5`, `val/mAP@0.75`, `val/mAP@0.9`, `val/mAP@0.5:0.95`. (thêm `--map-train` → có cả `train/mAP@*`).
+- Summary: `pruned_macs_M`, `macs_reduction_pct`, `pruned_params_M`, `params_reduction_pct` (train.py cần `--dense-ref`; NORTON tính sẵn).
 
 ## Benchmark (mọi method)
 
