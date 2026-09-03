@@ -14,6 +14,10 @@ Protocol doi chieu tu repo CORING (github.com/vantienpham/CORING, dong HRank):
     so cua bi-level voi 80 ep khong so duoc voi so cua CORING voi 300 ep.
   - GATE: mode=dense dung lai neu top-1 lech >0.5% so voi DENSE_TARGET. Dense sai
     moc thi moi so lieu prune ben tren deu vo nghia.
+  - NGAN SACH EPOCH: baseline (CORING) la one-shot -> prune 1 lan roi finetune 300 ep.
+    Bi-level la iterative -> tieu prune_iters * prune_finetune_epochs epoch NGAY TRONG
+    vong prune. So epoch do duoc ghi vao model_lean.json va mode=finetune TRU RA, nen
+    tong epoch sau khi roi dense checkpoint bang dung baseline. --ignore-budget de tat.
 
 Vi du:
   python cifar.py --mode dense --model resnet56 --output-dir ./output/cifar/r56_dense
@@ -203,6 +207,9 @@ def get_args():
                    help="hrank = bien the cua HRank/CORING (14.98M); single = cua SPSRC (14.72M)")
     p.add_argument("--protocol", default="coring", choices=["coring", "spsrc"],
                    help="recipe finetune sau prune, xem FINETUNE_PROTO")
+    p.add_argument("--ignore-budget", action="store_true",
+                   help="finetune du so epoch cua protocol, KHONG tru epoch vong prune "
+                        "-> bi-level duoc nhieu epoch hon baseline (chi dung de ablation)")
     p.add_argument("--skip-gate", action="store_true",
                    help="bo qua kiem tra dense vs published (chi dung khi smoke test)")
     p.add_argument("--wandb", action="store_true")
@@ -253,6 +260,16 @@ def main():
         print(f"Loaded dense: {p0:.2f}M params | {m0:.2f}M MACs | top1={ckpt.get('top1')}")
 
         proto = FINETUNE_PROTO[args.protocol]
+        # Ngan sach epoch SAU khi roi dense checkpoint phai bang cua baseline.
+        # Bi-level la iterative nen tieu mot phan ngay trong vong prune -> ghi lai
+        # de mode=finetune tru ra, neu khong bi-level duoc nhieu epoch hon baseline.
+        prune_epochs = args.prune_iters * args.prune_finetune_epochs
+        print(f"Ngan sach '{args.protocol}' = {proto['epochs']} ep | "
+              f"vong prune tieu {prune_epochs} ep | con lai cho finetune "
+              f"{proto['epochs'] - prune_epochs} ep")
+        assert prune_epochs < proto["epochs"], (
+            f"Vong prune ({prune_epochs} ep) da vuot ngan sach {proto['epochs']} ep")
+
         criterion = nn.CrossEntropyLoss()
         u_pruner, s_pruner = UnstructuredPruner(model), StructuredPruner(model)
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr or proto["lr"],
@@ -278,10 +295,14 @@ def main():
         print(f"Params {p0:.2f}M -> {p1:.2f}M (-{(1-p1/p0)*100:.2f}%) | "
               f"MACs {m0:.2f}M -> {m1:.2f}M (-{(1-m1/m0)*100:.2f}%)")
         evaluate(lean, criterion, loaders[1], device)
+        lean_cfg["prune_epochs"] = prune_epochs      # mode=finetune doc de tru ngan sach
+        with open(save_path.replace(".pth", ".json"), "w") as f:
+            json.dump(lean_cfg, f, indent=2)
         with open(os.path.join(args.output_dir, "cost.json"), "w") as f:
             json.dump({"params_M": p1, "macs_M": m1,
                        "params_red_pct": (1 - p1 / p0) * 100,
-                       "macs_red_pct": (1 - m1 / m0) * 100}, f, indent=2)
+                       "macs_red_pct": (1 - m1 / m0) * 100,
+                       "prune_epochs": prune_epochs}, f, indent=2)
         if wandb:
             wandb.log({"params_M": p1, "macs_M": m1,
                        "params_red_pct": (1 - p1 / p0) * 100,
@@ -298,10 +319,18 @@ def main():
         print(f"Lean: {pm:.2f}M params | {mm:.2f}M MACs")
         proto = FINETUNE_PROTO[args.protocol]
         args.weight_decay = proto["weight_decay"]
-        print(f"Protocol '{args.protocol}': {proto}")
+
+        # Tru so epoch vong prune da tieu -> tong ngan sach sau dense BANG baseline.
+        # Milestone dich theo cung so epoch de lich lr trung nhau tren truc tong.
+        spent = 0 if args.ignore_budget else int(cfg.get("prune_epochs", 0))
+        epochs = args.epochs or max(proto["epochs"] - spent, 1)
+        milestones = [max(m - spent, 1) for m in proto["milestones"]]
+        print(f"Protocol '{args.protocol}': ngan sach {proto['epochs']} ep "
+              f"- {spent} ep (vong prune) = {epochs} ep finetune | "
+              f"lr={args.lr or proto['lr']} milestones={milestones} wd={proto['weight_decay']}")
         run_training(model, loaders, args, device,
-                     args.epochs or proto["epochs"], args.lr or proto["lr"],
-                     proto["milestones"], "finetune", wandb=wandb, cfg=cfg)
+                     epochs, args.lr or proto["lr"],
+                     milestones, "finetune", wandb=wandb, cfg=cfg)
 
     if wandb:
         wandb.finish()
