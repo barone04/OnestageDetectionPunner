@@ -38,9 +38,13 @@ def _surgery_vgg(src: CifarVGG, dst: CifarVGG):
                    else torch.arange(s_conv.out_channels))
         _copy_sliced(d_conv, s_conv, in_idx, out_idx)
         in_idx = out_idx
-    # classifier: feature map 1x1 sau 5 maxpool -> cot cua Linear map 1-1 voi kenh
-    dst.classifier.weight.data.copy_(src.classifier.weight.data[:, in_idx])
-    dst.classifier.bias.data.copy_(src.classifier.bias.data)
+    # classifier: feature map 1x1 -> cot cua Linear dau map 1-1 voi kenh conv cuoi
+    dst.first_linear.weight.data.copy_(src.first_linear.weight.data[:, in_idx])
+    dst.first_linear.bias.data.copy_(src.first_linear.bias.data)
+    if src.head == "hrank":     # BN1d + Linear cuoi khong doi chieu
+        for d, s in zip(dst.classifier[1:], src.classifier[1:]):
+            if hasattr(s, "weight"):
+                d.load_state_dict(s.state_dict())
 
 
 @torch.no_grad()
@@ -96,9 +100,10 @@ def demo():
     from pruning import StructuredPruner
 
     x = torch.randn(4, 3, 32, 32)
-    for build in (lambda: CifarVGG("vgg16"),
-                  lambda: CifarVGG("vgg16", prune_set="l1a"),
-                  lambda: CifarResNet(56)):
+    for name, build in (("vgg-hrank",  lambda: CifarVGG("vgg16", head="hrank")),
+                        ("vgg-single", lambda: CifarVGG("vgg16", head="single")),
+                        ("vgg-l1a",    lambda: CifarVGG("vgg16", prune_set="l1a")),
+                        ("resnet56",   lambda: CifarResNet(56))):
         m = build().eval()
         StructuredPruner(m).prune(prune_ratio=0.4, verbose=False)
         with torch.no_grad():
@@ -107,10 +112,10 @@ def demo():
         with torch.no_grad():
             got = lean(x)
         err = (ref - got).abs().max().item()
-        assert err < 1e-4, f"{cfg['family']}: surgery lech {err}"
+        assert err < 1e-4, f"{name}: surgery lech {err}"
         p0 = sum(p.numel() for p in m.parameters())
         p1 = sum(p.numel() for p in lean.parameters())
-        print(f"OK  {cfg['family']:<7} max|diff|={err:.2e}  "
+        print(f"OK  {name:<10} max|diff|={err:.2e}  "
               f"params {p0/1e6:.2f}M -> {p1/1e6:.2f}M (-{(1-p1/p0)*100:.1f}%)")
 
 

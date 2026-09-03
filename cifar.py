@@ -4,14 +4,16 @@ cifar.py — Benchmark bi-level pruning tren CIFAR-10/100 (VGG16-BN, ResNet-56).
 Muc dich: chung minh method tai lap duoc tren benchmark chuan, de so voi so PUBLISHED
 cua L1 / HRank / GAL / SSS / SPSRC... ma khong phai chay lai tung baseline.
 
-Protocol theo dung literature (Li et al. 2017 / SPSRC WACV 2024):
-  - transform: RandomCrop(32, pad=4) + HFlip + Normalize. KHONG cutout/autoaug/mixup.
-  - SGD momentum 0.9, wd 1e-4, batch 128.
-  - dense   VGG16-BN : 164 ep, lr 0.1, x0.1 @81,122
-    dense   ResNet-56: 200 ep, lr 0.1, x0.1 @60,120,160
-  - finetune sau prune: lr 0.001, x0.1 @20.
-  - Dense phai tai lap: VGG16-BN 93.51 / ResNet-56 93.59 (+-0.2). Lech >0.5 thi
-    KHONG duoc trich bang published.
+Protocol doi chieu tu repo CORING (github.com/vantienpham/CORING, dong HRank):
+  - transform: RandomCrop(32, pad=4) + HFlip + Normalize(mean .4914/.4822/.4465,
+    std .2023/.1994/.2010). KHONG cutout/autoaug/mixup — them vao la mat tinh so sanh.
+  - dense (train tu scratch): SGD 0.9, wd 1e-4, batch 128,
+    VGG16-BN 164 ep lr 0.1 x0.1@81,122 | ResNet-56 200 ep lr 0.1 x0.1@60,120,160
+  - finetune sau prune: xem FINETUNE_PROTO — "coring" (300 ep, lr 0.01, @150,225,
+    wd 5e-3) hoac "spsrc" (80 ep, lr 0.001, @20, wd 1e-4). CHON TRUOC KHI SO BANG:
+    so cua bi-level voi 80 ep khong so duoc voi so cua CORING voi 300 ep.
+  - GATE: mode=dense dung lai neu top-1 lech >0.5% so voi DENSE_TARGET. Dense sai
+    moc thi moi so lieu prune ben tren deu vo nghia.
 
 Vi du:
   python cifar.py --mode dense --model resnet56 --output-dir ./output/cifar/r56_dense
@@ -33,14 +35,29 @@ from models.cifar import CifarVGG, CifarResNet, build_cifar_model
 from pruning import UnstructuredPruner, StructuredPruner
 from pruning.surgery_cifar import convert_to_lean_cifar
 
-# Normalize chuan CIFAR-10, dung chung trong toan bo literature pruning
+# Normalize: DUNG DUNG gia tri cua HRank/CORING (main/data/cifar10.py cua repo CORING).
+# Ban (0.2470,0.2435,0.2616) cung pho bien nhung KHAC -> doi la mat tinh so sanh.
 CIFAR_MEAN = (0.4914, 0.4822, 0.4465)
-CIFAR_STD = (0.2470, 0.2435, 0.2616)
+CIFAR_STD = (0.2023, 0.1994, 0.2010)
 
-# lich train dense chuan theo tung model
+# lich train dense tu scratch theo tung model (lr 0.1, wd 1e-4)
 DENSE_SCHED = {
     "vgg16":    dict(epochs=164, milestones=[81, 122]),
     "resnet56": dict(epochs=200, milestones=[60, 120, 160]),
+}
+
+# recipe finetune SAU prune — moi dong paper mot kieu, phai chon truoc khi so bang
+FINETUNE_PROTO = {
+    # main/scripts/resnet56_cifar10/vbd.sh cua CORING
+    "coring": dict(lr=0.01, epochs=300, milestones=[150, 225], weight_decay=5e-3),
+    # SPSRC: "same optimization setting as baseline but lr 0.001, decaying at 20th epoch"
+    "spsrc":  dict(lr=0.001, epochs=80, milestones=[20], weight_decay=1e-4),
+}
+
+# Muc tieu dense phai dat truoc khi duoc phep prune (top-1 %), theo tung dong paper
+DENSE_TARGET = {
+    ("resnet56", "cifar10"): 93.26,     # HRank/CORING baseline
+    ("vgg16", "cifar10"): 93.96,        # HRank/CORING baseline (head="hrank")
 }
 
 
@@ -75,9 +92,9 @@ def get_loaders(data_path, dataset, batch_size, workers):
                                         pin_memory=True))
 
 
-def build(model_name, num_classes, prune_set="all"):
+def build(model_name, num_classes, prune_set="all", head="hrank"):
     if model_name == "vgg16":
-        return CifarVGG("vgg16", num_classes, prune_set=prune_set)
+        return CifarVGG("vgg16", num_classes, prune_set=prune_set, head=head)
     return CifarResNet(int(model_name.replace("resnet", "")), num_classes)
 
 
@@ -182,6 +199,12 @@ def get_args():
     p.add_argument("--sensitivity-mult", default=2.0, type=float)
     p.add_argument("--vgg-prune-set", default="all", choices=["all", "l1a"],
                    help="l1a = cung tap layer voi L1 (VGG-16-pruned-A)")
+    p.add_argument("--vgg-head", default="hrank", choices=["hrank", "single"],
+                   help="hrank = bien the cua HRank/CORING (14.98M); single = cua SPSRC (14.72M)")
+    p.add_argument("--protocol", default="coring", choices=["coring", "spsrc"],
+                   help="recipe finetune sau prune, xem FINETUNE_PROTO")
+    p.add_argument("--skip-gate", action="store_true",
+                   help="bo qua kiem tra dense vs published (chi dung khi smoke test)")
     p.add_argument("--wandb", action="store_true")
     return p.parse_args()
 
@@ -204,12 +227,21 @@ def main():
 
     # ---------------- dense ----------------
     if args.mode == "dense":
-        model = build(args.model, num_classes, args.vgg_prune_set).to(device)
+        model = build(args.model, num_classes, args.vgg_prune_set, args.vgg_head).to(device)
         pm, mm = count_cost(model, device)
         print(f"Dense: {pm:.2f}M params | {mm:.2f}M MACs")
-        run_training(model, loaders, args, device,
-                     args.epochs or sched["epochs"], args.lr or 0.1, sched["milestones"],
-                     "dense", wandb=wandb)
+        best = run_training(model, loaders, args, device,
+                            args.epochs or sched["epochs"], args.lr or 0.1,
+                            sched["milestones"], "dense", wandb=wandb)
+        target = None if args.skip_gate else DENSE_TARGET.get((args.model, args.dataset))
+        if target:
+            gap = best - target
+            ok = abs(gap) <= 0.5
+            print(f"\n[GATE] dense={best:.2f}% vs published={target:.2f}% "
+                  f"({gap:+.2f}) -> {'PASS' if ok else 'FAIL'}")
+            if not ok:
+                raise SystemExit("Dense lech >0.5% so voi published -> KHONG duoc prune "
+                                 "va KHONG duoc trich bang published. Sua training truoc.")
 
     # ---------------- bi-level prune ----------------
     elif args.mode == "prune":
@@ -220,10 +252,12 @@ def main():
         p0, m0 = count_cost(model, device)
         print(f"Loaded dense: {p0:.2f}M params | {m0:.2f}M MACs | top1={ckpt.get('top1')}")
 
+        proto = FINETUNE_PROTO[args.protocol]
         criterion = nn.CrossEntropyLoss()
         u_pruner, s_pruner = UnstructuredPruner(model), StructuredPruner(model)
-        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr or 0.001,
-                                    momentum=args.momentum, weight_decay=args.weight_decay)
+        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr or proto["lr"],
+                                    momentum=args.momentum,
+                                    weight_decay=proto["weight_decay"])
 
         for it in range(args.prune_iters):
             sparsity = args.target_sparsity * (it + 1) / args.prune_iters
@@ -262,9 +296,12 @@ def main():
         model.load_state_dict(torch.load(args.lean, map_location="cpu"))
         pm, mm = count_cost(model, device)
         print(f"Lean: {pm:.2f}M params | {mm:.2f}M MACs")
+        proto = FINETUNE_PROTO[args.protocol]
+        args.weight_decay = proto["weight_decay"]
+        print(f"Protocol '{args.protocol}': {proto}")
         run_training(model, loaders, args, device,
-                     args.epochs or 80, args.lr or 0.001, [20],
-                     "finetune", wandb=wandb, cfg=cfg)
+                     args.epochs or proto["epochs"], args.lr or proto["lr"],
+                     proto["milestones"], "finetune", wandb=wandb, cfg=cfg)
 
     if wandb:
         wandb.finish()

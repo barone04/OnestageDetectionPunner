@@ -24,12 +24,24 @@ import torch
 import torch.nn as nn
 
 from .element import PrunableConv
-from .backbone import BasicBlock, VGG_CFG
+from .backbone import BasicBlock
 
 
 # ---------------------------------------------------------------------------
 # VGG16-BN cho CIFAR
 # ---------------------------------------------------------------------------
+# HAI dong VGG16-BN khac nhau trong literature pruning — KHONG the tron so vao 1 bang:
+#   "hrank"  : 4 maxpool + AvgPool(2), classifier = Linear-BN1d-ReLU-Linear.
+#              14.98M params. Dung boi HRank / CORING / GAL. <- mac dinh
+#   "single" : 5 maxpool, classifier = 1 Linear(512,10).
+#              14.72M params. Khop dense 14.73M ma SPSRC bao cao.
+VGG16_CFG = {
+    "hrank": [64, 64, "M", 128, 128, "M", 256, 256, 256, "M",
+              512, 512, 512, "M", 512, 512, 512],
+    "single": [64, 64, "M", 128, 128, "M", 256, 256, 256, "M",
+               512, 512, 512, "M", 512, 512, 512, "M"],
+}
+
 # conv index (1-based) duoc prune theo tung preset
 VGG_PRUNE_SETS = {
     "all": None,                          # None = tat ca
@@ -38,12 +50,14 @@ VGG_PRUNE_SETS = {
 
 
 class CifarVGG(nn.Module):
-    def __init__(self, arch="vgg16", num_classes=10, widths=None, prune_set="all"):
+    def __init__(self, arch="vgg16", num_classes=10, widths=None, prune_set="all",
+                 head="hrank"):
         super().__init__()
-        cfg = VGG_CFG[arch]
+        cfg = VGG16_CFG[head]
         self.arch = arch
         self.num_classes = num_classes
         self.prune_set = prune_set
+        self.head = head
 
         layers, self.convs = [], []
         c_in, ci = 3, 0
@@ -56,10 +70,22 @@ class CifarVGG(nn.Module):
             layers.append(conv)
             self.convs.append(conv)
             c_in, ci = c_out, ci + 1
+        if head == "hrank":
+            layers.append(nn.AvgPool2d(2, 2))    # 2x2 -> 1x1 (chi co 4 maxpool)
 
         self.features = nn.Sequential(*layers)
-        self.classifier = nn.Linear(c_in, num_classes)
+        if head == "hrank":
+            self.classifier = nn.Sequential(
+                nn.Linear(c_in, 512), nn.BatchNorm1d(512), nn.ReLU(inplace=True),
+                nn.Linear(512, num_classes))
+        else:
+            self.classifier = nn.Linear(c_in, num_classes)
         self._widths = widths
+
+    @property
+    def first_linear(self):
+        """Linear an vao kenh conv cuoi -> phai slice khi surgery."""
+        return self.classifier[0] if self.head == "hrank" else self.classifier
 
     def forward(self, x):
         x = self.features(x)
@@ -82,7 +108,7 @@ class CifarVGG(nn.Module):
     def config(self):
         return {
             "family": "vgg", "arch": self.arch, "num_classes": self.num_classes,
-            "widths": self._widths, "prune_set": self.prune_set,
+            "widths": self._widths, "prune_set": self.prune_set, "head": self.head,
         }
 
 
@@ -156,22 +182,29 @@ def build_cifar_model(cfg):
     """Dung lai model tu dict config (dung cho reload / surgery rebuild)."""
     if cfg["family"] == "vgg":
         return CifarVGG(cfg.get("arch", "vgg16"), cfg.get("num_classes", 10),
-                        cfg.get("widths"), cfg.get("prune_set", "all"))
+                        cfg.get("widths"), cfg.get("prune_set", "all"),
+                        cfg.get("head", "hrank"))
     return CifarResNet(cfg.get("depth", 56), cfg.get("num_classes", 10),
                        cfg.get("block_mids"))
 
 
 def demo():
     """Self-check: shape + so params/MACs phai khop bang published."""
-    vgg = CifarVGG("vgg16")
-    res = CifarResNet(56)
     x = torch.randn(2, 3, 32, 32)
-    assert vgg(x).shape == (2, 10) and res(x).shape == (2, 10)
-
-    pv = sum(p.numel() for p in vgg.parameters())
+    res = CifarResNet(56)
+    assert res(x).shape == (2, 10)
     pr = sum(p.numel() for p in res.parameters())
-    assert 14.6e6 < pv < 14.8e6, f"VGG16-BN params {pv} != ~14.72M"
     assert 0.83e6 < pr < 0.87e6, f"ResNet-56 params {pr} != ~0.85M"
+
+    # hai bien the VGG phai khop dung so dense cua dong tuong ung
+    counts = {}
+    for head, lo, hi in (("hrank", 14.9e6, 15.0e6), ("single", 14.6e6, 14.8e6)):
+        vgg = CifarVGG("vgg16", head=head)
+        assert vgg(x).shape == (2, 10)
+        pv = counts[head] = sum(p.numel() for p in vgg.parameters())
+        assert lo < pv < hi, f"VGG16-BN[{head}] params {pv} ngoai khoang"
+    vgg = CifarVGG("vgg16")
+    pv = counts["hrank"]
 
     # scope structured: ResNet-56 -> 27 block (chi conv1 moi block)
     assert len(res.get_prunable_layers("structured")) == 27
@@ -182,7 +215,8 @@ def demo():
     assert build_cifar_model(vgg.config())(x).shape == (2, 10)
     assert build_cifar_model(res.config())(x).shape == (2, 10)
 
-    print(f"OK  VGG16-BN {pv/1e6:.2f}M params | ResNet-56 {pr/1e6:.2f}M params")
+    print(f"OK  VGG16-BN hrank={counts['hrank']/1e6:.2f}M single={counts['single']/1e6:.2f}M "
+          f"| ResNet-56 {pr/1e6:.2f}M")
 
 
 if __name__ == "__main__":
