@@ -12,6 +12,7 @@ import json
 import torch
 
 from models.cifar import CifarVGG, CifarResNet, build_cifar_model
+from models.element import PrunableConv
 from .surgery import _kept_idx, _copy_sliced
 
 
@@ -59,7 +60,8 @@ def _surgery_resnet(src: CifarResNet, dst: CifarResNet):
             _copy_sliced(d_blk.conv1, s_blk.conv1, full_in, mid_idx)
             _copy_sliced(d_blk.conv2, s_blk.conv2, mid_idx,
                          torch.arange(s_blk.conv2.out_channels))
-            if s_blk.downsample is not None:
+            # ShortcutA khong co tham so -> khong copy gi
+            if isinstance(s_blk.downsample, PrunableConv):
                 _copy_sliced(d_blk.downsample, s_blk.downsample, full_in,
                              torch.arange(s_blk.downsample.out_channels))
 
@@ -103,7 +105,8 @@ def demo():
     for name, build in (("vgg-hrank",  lambda: CifarVGG("vgg16", head="hrank")),
                         ("vgg-single", lambda: CifarVGG("vgg16", head="single")),
                         ("vgg-l1a",    lambda: CifarVGG("vgg16", prune_set="l1a")),
-                        ("resnet56",   lambda: CifarResNet(56))):
+                        ("resnet56-A", lambda: CifarResNet(56, shortcut="A")),
+                        ("resnet56-B", lambda: CifarResNet(56, shortcut="B"))):
         m = build().eval()
         StructuredPruner(m).prune(prune_ratio=0.4, verbose=False)
         with torch.no_grad():

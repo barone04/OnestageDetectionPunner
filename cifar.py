@@ -35,7 +35,8 @@ import argparse
 import torch
 import torch.nn as nn
 
-from models.cifar import CifarVGG, CifarResNet, build_cifar_model
+from models.cifar import (CifarVGG, CifarResNet, build_cifar_model,
+                          load_hrank_state_dict)
 from pruning import UnstructuredPruner, StructuredPruner
 from pruning.surgery_cifar import convert_to_lean_cifar
 
@@ -110,8 +111,48 @@ def count_cost(model, device):
         macs, _ = profile(model, inputs=(torch.randn(1, 3, 32, 32).to(device),), verbose=False)
         return params, macs / 1e6
     except Exception as e:                       # ponytail: thop optional, khong chan train
-        print(f"[WARN] thop loi ({e}) -> bo qua MACs")
+        if not count_cost._warned:               # sparsity_for_target goi ham nay ~17 lan
+            print(f"[WARN] thop loi ({e}) -> bo qua MACs (--match-macs se khong dung duoc)")
+            count_cost._warned = True
         return params, float("nan")
+
+
+count_cost._warned = False
+
+
+def sparsity_for_target(cfg, target, metric="macs", lo=0.01, hi=0.95, iters=14):
+    """Tim target_sparsity de lean model rot dung diem nen cua baseline (iso-FLOPs).
+
+    Chay duoc ma KHONG can train vi so kenh con lai chi phu thuoc prune_ratio:
+    StructuredPruner cat int(round(n * ratio)) filter moi lop, khong phu thuoc weight.
+    => cost(ratio) don dieu giam -> chia doi ~14 lan la du.
+    """
+    cpu = torch.device("cpu")
+
+    def cost_at(r):
+        m = build_cifar_model(cfg)
+        StructuredPruner(m).prune(prune_ratio=r, verbose=False)
+        lean, _ = convert_to_lean_cifar(m)
+        p, mac = count_cost(lean, cpu)
+        return p if metric == "params" else mac
+
+    c_lo, c_hi = cost_at(lo), cost_at(hi)
+    if not (c_hi <= target <= c_lo):
+        raise SystemExit(f"target {metric}={target} ngoai tam voi: "
+                         f"[{c_hi:.2f} @r={hi}, {c_lo:.2f} @r={lo}]")
+    for _ in range(iters):
+        mid = (lo + hi) / 2
+        if cost_at(mid) > target:
+            lo = mid
+        else:
+            hi = mid
+    best = round((lo + hi) / 2, 3)
+    got = cost_at(best)
+    print(f"[match] target {metric}={target} -> target-sparsity={best} "
+          f"(dat {got:.2f}, lech {100*(got-target)/target:+.2f}%)")
+    if abs(got - target) / target > 0.02:
+        print(f"[match] CANH BAO: lech >2% — grid kenh qua tho de khop diem nay")
+    return best
 
 
 def train_one_epoch(model, criterion, loader, optimizer, device, epoch, total, pruner=None):
@@ -185,7 +226,10 @@ def get_args():
     p.add_argument("--dataset", default="cifar10", choices=["cifar10", "cifar100"])
     p.add_argument("--data-path", default="./data")
     p.add_argument("--output-dir", default="./output/cifar")
-    p.add_argument("--checkpoint", default=None, help="dense ckpt (mode=prune)")
+    p.add_argument("--checkpoint", default=None, help="dense ckpt cua ta (mode=prune)")
+    p.add_argument("--pretrained", default=None,
+                   help="checkpoint HRank/CORING (vd resnet_56.pt) — dung chung diem xuat "
+                        "phat voi baseline. Thay cho --checkpoint.")
     p.add_argument("--lean", default=None, help="lean ckpt (mode=finetune)")
     # protocol chuan — chi doi khi co ly do, doi la mat tinh so sanh voi so published
     p.add_argument("--batch-size", default=128, type=int)
@@ -201,6 +245,14 @@ def get_args():
     p.add_argument("--prune-iters", default=5, type=int)
     p.add_argument("--prune-finetune-epochs", default=3, type=int)
     p.add_argument("--sensitivity-mult", default=2.0, type=float)
+    p.add_argument("--no-unstructured", action="store_true",
+                   help="tat muc unstructured -> bien the STRUCTURED-ONLY, cung loai voi "
+                        "CORING/HRank. Bat buoc cho bang so sanh chinh; bi-level day du "
+                        "de o bang ablation.")
+    p.add_argument("--match-macs", default=None, type=float,
+                   help="MACs (M) muc tieu -> tu tim target-sparsity, bo qua --target-sparsity")
+    p.add_argument("--match-params", default=None, type=float,
+                   help="Params (M) muc tieu -> tu tim target-sparsity")
     p.add_argument("--vgg-prune-set", default="all", choices=["all", "l1a"],
                    help="l1a = cung tap layer voi L1 (VGG-16-pruned-A)")
     p.add_argument("--vgg-head", default="hrank", choices=["hrank", "single"],
@@ -252,12 +304,28 @@ def main():
 
     # ---------------- bi-level prune ----------------
     elif args.mode == "prune":
-        assert args.checkpoint, "--checkpoint la bat buoc voi mode=prune"
-        ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-        model = build_cifar_model(ckpt["config"]).to(device)
-        model.load_state_dict(ckpt["model"])
+        assert args.checkpoint or args.pretrained, "can --checkpoint hoac --pretrained"
+        if args.pretrained:
+            # cung diem xuat phat voi baseline (CORING nap checkpoint HRank, khong tu train)
+            dense_cfg = build(args.model, num_classes, args.vgg_prune_set,
+                              args.vgg_head).config()
+            model = build_cifar_model(dense_cfg)
+            load_hrank_state_dict(model, args.pretrained)
+            model = model.to(device)
+        else:
+            ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+            dense_cfg = ckpt["config"]
+            model = build_cifar_model(dense_cfg).to(device)
+            model.load_state_dict(ckpt["model"])
+            print(f"top1 dense: {ckpt.get('top1')}")
         p0, m0 = count_cost(model, device)
-        print(f"Loaded dense: {p0:.2f}M params | {m0:.2f}M MACs | top1={ckpt.get('top1')}")
+        print(f"Dense: {p0:.2f}M params | {m0:.2f}M MACs")
+
+        # match iso-FLOPs voi diem nen cua baseline (khong ton GPU, xem sparsity_for_target)
+        if args.match_macs or args.match_params:
+            args.target_sparsity = sparsity_for_target(
+                dense_cfg, args.match_macs or args.match_params,
+                "macs" if args.match_macs else "params")
 
         proto = FINETUNE_PROTO[args.protocol]
         # Ngan sach epoch SAU khi roi dense checkpoint phai bang cua baseline.
@@ -279,12 +347,14 @@ def main():
         for it in range(args.prune_iters):
             sparsity = args.target_sparsity * (it + 1) / args.prune_iters
             print(f"\n=== Prune iter {it+1}/{args.prune_iters} | sparsity={sparsity:.3f} ===")
-            u_pruner.prune(sensitivity=args.sensitivity_mult * sparsity)
+            if not args.no_unstructured:
+                u_pruner.prune(sensitivity=args.sensitivity_mult * sparsity)
+                print(f"  Song Han global sparsity={u_pruner.global_sparsity():.3f}")
             s_pruner.prune(prune_ratio=sparsity)
-            print(f"  Song Han global sparsity={u_pruner.global_sparsity():.3f}")
             for ep in range(args.prune_finetune_epochs):
                 train_one_epoch(model, criterion, loaders[0], optimizer, device,
-                                ep, args.prune_finetune_epochs, pruner=u_pruner)
+                                ep, args.prune_finetune_epochs,
+                                pruner=None if args.no_unstructured else u_pruner)
             evaluate(model, criterion, loaders[1], device)
 
         print("\n=== Model Surgery ===")
@@ -302,7 +372,10 @@ def main():
             json.dump({"params_M": p1, "macs_M": m1,
                        "params_red_pct": (1 - p1 / p0) * 100,
                        "macs_red_pct": (1 - m1 / m0) * 100,
-                       "prune_epochs": prune_epochs}, f, indent=2)
+                       "prune_epochs": prune_epochs,
+                       "target_sparsity": args.target_sparsity,
+                       "variant": "structured-only" if args.no_unstructured else "bi-level",
+                       }, f, indent=2)
         if wandb:
             wandb.log({"params_M": p1, "macs_M": m1,
                        "params_red_pct": (1 - p1 / p0) * 100,
