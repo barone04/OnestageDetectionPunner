@@ -28,6 +28,7 @@ Vi du:
       --epochs 80 --output-dir ./output/cifar/r56_p50_ft
 """
 import os
+import re
 import json
 import time
 import argparse
@@ -191,8 +192,21 @@ def evaluate(model, criterion, loader, device):
     return loss_sum / seen, acc
 
 
+def wandb_log_epoch(wandb, stage, ep, lr, tr_loss, tr_acc, va_loss, va_acc):
+    """Mot cho duy nhat de log 1 epoch -> ten metric dong nhat giua cac stage.
+
+    `epoch` la truc TONG (0..299): vong prune 0..14, finetune 15..299 -> ve chung
+    duoc mot duong lien tuc tren ngan sach 300 epoch cua baseline.
+    """
+    if not wandb:
+        return
+    wandb.log({"epoch": ep, "lr": lr, "stage": stage,
+               "train/loss": tr_loss, "train/acc": tr_acc,
+               "val/loss": va_loss, "val/acc": va_acc})
+
+
 def run_training(model, loaders, args, device, epochs, lr, milestones, tag, pruner=None,
-                 wandb=None, cfg=None):
+                 wandb=None, cfg=None, epoch_offset=0):
     train_loader, val_loader = loaders
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=args.momentum,
@@ -205,10 +219,8 @@ def run_training(model, loaders, args, device, epochs, lr, milestones, tag, prun
                                           device, ep, epochs, pruner)
         va_loss, va_acc = evaluate(model, criterion, val_loader, device)
         scheduler.step()
-        if wandb:
-            wandb.log({"epoch": ep, "lr": optimizer.param_groups[0]["lr"],
-                       f"{tag}/train_loss": tr_loss, f"{tag}/train_acc": tr_acc,
-                       f"{tag}/val_loss": va_loss, f"{tag}/val_top1": va_acc})
+        wandb_log_epoch(wandb, tag, epoch_offset + ep, optimizer.param_groups[0]["lr"],
+                        tr_loss, tr_acc, va_loss, va_acc)
         if va_acc > best:
             best = va_acc
             torch.save({"model": model.state_dict(), "config": cfg or model.config(),
@@ -265,6 +277,9 @@ def get_args():
     p.add_argument("--skip-gate", action="store_true",
                    help="bo qua kiem tra dense vs published (chi dung khi smoke test)")
     p.add_argument("--wandb", action="store_true")
+    p.add_argument("--wandb-run", default=None,
+                   help="ten run wandb. Truyen CUNG mot ten cho buoc prune va finetune "
+                        "-> gop thanh 1 run (resume), duong cong + params/MACs chung cho.")
     return p.parse_args()
 
 
@@ -279,7 +294,11 @@ def main():
     wandb = None
     if args.wandb:
         import wandb
-        wandb.init(name=os.path.basename(args.output_dir.rstrip("/")), config=vars(args))
+        # --wandb-run: prune va finetune la 2 process nhung dung chung 1 run (resume)
+        # -> duong cong training + params/MACs nam CHUNG mot cho.
+        name = args.wandb_run or os.path.basename(args.output_dir.rstrip("/"))
+        rid = re.sub(r"[^A-Za-z0-9_-]", "_", name)   # wandb id: chi chu/so/-/_
+        wandb.init(name=name, id=rid, resume="allow", config=vars(args))
 
     loaders = get_loaders(args.data_path, args.dataset, args.batch_size, args.workers)
     sched = DENSE_SCHED.get(args.model, DENSE_SCHED["resnet56"])
@@ -352,10 +371,14 @@ def main():
                 print(f"  Song Han global sparsity={u_pruner.global_sparsity():.3f}")
             s_pruner.prune(prune_ratio=sparsity)
             for ep in range(args.prune_finetune_epochs):
-                train_one_epoch(model, criterion, loaders[0], optimizer, device,
-                                ep, args.prune_finetune_epochs,
-                                pruner=None if args.no_unstructured else u_pruner)
-            evaluate(model, criterion, loaders[1], device)
+                tr_loss, tr_acc = train_one_epoch(
+                    model, criterion, loaders[0], optimizer, device,
+                    ep, args.prune_finetune_epochs,
+                    pruner=None if args.no_unstructured else u_pruner)
+                va_loss, va_acc = evaluate(model, criterion, loaders[1], device)
+                wandb_log_epoch(wandb, "prune", it * args.prune_finetune_epochs + ep,
+                                optimizer.param_groups[0]["lr"],
+                                tr_loss, tr_acc, va_loss, va_acc)
 
         print("\n=== Model Surgery ===")
         save_path = os.path.join(args.output_dir, "model_lean.pth")
@@ -377,9 +400,16 @@ def main():
                        "variant": "structured-only" if args.no_unstructured else "bi-level",
                        }, f, indent=2)
         if wandb:
-            wandb.log({"params_M": p1, "macs_M": m1,
-                       "params_red_pct": (1 - p1 / p0) * 100,
-                       "macs_red_pct": (1 - m1 / m0) * 100})
+            wandb.summary.update({
+                "params_M": p1, "macs_M": m1,
+                "params_red_pct": (1 - p1 / p0) * 100,
+                "macs_red_pct": (1 - m1 / m0) * 100,
+                "dense_params_M": p0, "dense_macs_M": m0,
+                "target_sparsity": args.target_sparsity,
+                "variant": "structured-only" if args.no_unstructured else "bi-level",
+                "unstructured_sparsity": 0.0 if args.no_unstructured
+                                         else u_pruner.global_sparsity(),
+            })
 
     # ---------------- finetune lean ----------------
     else:
@@ -395,6 +425,12 @@ def main():
 
         # Tru so epoch vong prune da tieu -> tong ngan sach sau dense BANG baseline.
         # Milestone dich theo cung so epoch de lich lr trung nhau tren truc tong.
+        cost_path = os.path.join(os.path.dirname(os.path.abspath(args.lean)), "cost.json")
+        if wandb and os.path.isfile(cost_path):
+            with open(cost_path) as f:
+                wandb.summary.update(json.load(f))     # params/MACs/reduction/variant
+            print(f"Da day cost.json len wandb summary: {cost_path}")
+
         spent = 0 if args.ignore_budget else int(cfg.get("prune_epochs", 0))
         epochs = args.epochs or max(proto["epochs"] - spent, 1)
         milestones = [max(m - spent, 1) for m in proto["milestones"]]
@@ -403,7 +439,7 @@ def main():
               f"lr={args.lr or proto['lr']} milestones={milestones} wd={proto['weight_decay']}")
         run_training(model, loaders, args, device,
                      epochs, args.lr or proto["lr"],
-                     milestones, "finetune", wandb=wandb, cfg=cfg)
+                     milestones, "finetune", wandb=wandb, cfg=cfg, epoch_offset=spent)
 
     if wandb:
         wandb.finish()
