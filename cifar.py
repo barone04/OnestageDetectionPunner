@@ -105,20 +105,29 @@ def build(model_name, num_classes, prune_set="all", head="hrank"):
 
 
 def count_cost(model, device):
-    """Params (M) + MACs (M). thop khong bat duoc mask nen goi TRUOC/SAU surgery."""
+    """Params (M) + MACs (M) cua Conv2d + Linear.
+
+    KHONG dung thop: thop cong them BatchNorm nen ResNet-56 dense ra 127.62M, trong
+    khi HRank/CORING/L1/HRank deu bao 125.49M (chi conv+linear). Lech 1.7% la du de
+    con so cua ta khong dat canh bang published duoc. Ham nay cho dung 125.49M.
+    """
     params = sum(p.numel() for p in model.parameters()) / 1e6
-    try:
-        from thop import profile
-        macs, _ = profile(model, inputs=(torch.randn(1, 3, 32, 32).to(device),), verbose=False)
-        return params, macs / 1e6
-    except Exception as e:                       # ponytail: thop optional, khong chan train
-        if not count_cost._warned:               # sparsity_for_target goi ham nay ~17 lan
-            print(f"[WARN] thop loi ({e}) -> bo qua MACs (--match-macs se khong dung duoc)")
-            count_cost._warned = True
-        return params, float("nan")
+    total, hooks = [0], []
 
+    def hk(m, i, o):
+        total[0] += m.weight.numel() * (o.shape[-1] * o.shape[-2] if o.dim() == 4 else 1)
 
-count_cost._warned = False
+    for mod in model.modules():
+        if isinstance(mod, (nn.Conv2d, nn.Linear)):
+            hooks.append(mod.register_forward_hook(hk))
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+        model(torch.randn(1, 3, 32, 32).to(device))
+    model.train(was_training)
+    for h in hooks:
+        h.remove()
+    return params, total[0] / 1e6
 
 
 def sparsity_for_target(cfg, target, metric="macs", lo=0.01, hi=0.95, iters=14):
