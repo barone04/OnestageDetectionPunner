@@ -285,6 +285,10 @@ def get_args():
                    help="hrank = bien the cua HRank/CORING (14.98M); single = cua SPSRC (14.72M)")
     p.add_argument("--protocol", default="coring", choices=["coring", "spsrc"],
                    help="recipe finetune sau prune, xem FINETUNE_PROTO")
+    p.add_argument("--budget", default=None, type=int,
+                   help="Doi TONG ngan sach epoch (vong prune + finetune), milestone keo "
+                        "theo ti le. Vd --budget 400 de bang CHIP. Mac dinh = cua protocol. "
+                        "Doi la khong con so sanh ngan sach voi CORING duoc nua -> phai khai.")
     p.add_argument("--ignore-budget", action="store_true",
                    help="finetune du so epoch cua protocol, KHONG tru epoch vong prune "
                         "-> bi-level duoc nhieu epoch hon baseline (chi dung de ablation)")
@@ -446,11 +450,24 @@ def main():
             print(f"Da day cost.json len wandb summary: {cost_path}")
 
         spent = 0 if args.ignore_budget else int(cfg.get("prune_epochs", 0))
-        epochs = args.epochs or max(proto["epochs"] - spent, 1)
-        milestones = [max(m - spent, 1) for m in proto["milestones"]]
-        print(f"Protocol '{args.protocol}': ngan sach {proto['epochs']} ep "
+
+        if args.budget:
+            # Doi tong ngan sach (vd --budget 400 de bang CHIP): GIU NGUYEN HINH DANG
+            # lich lr bang cach keo milestone theo ti le, roi moi tru phan vong prune.
+            # Khong lam vay thi --epochs 400 van dung milestone 135/210 -> lich lr sai.
+            k = args.budget / proto["epochs"]
+            total = args.budget
+            ms_global = [int(round(m * k)) for m in proto["milestones"]]
+        else:
+            total = proto["epochs"]
+            ms_global = list(proto["milestones"])
+        epochs = args.epochs or max(total - spent, 1)
+        milestones = [max(m - spent, 1) for m in ms_global]
+
+        print(f"Protocol '{args.protocol}': ngan sach {total} ep "
               f"- {spent} ep (vong prune) = {epochs} ep finetune | "
-              f"lr={args.lr or proto['lr']} milestones={milestones} wd={proto['weight_decay']}")
+              f"lr={args.lr or proto['lr']} milestones={milestones} "
+              f"(truc tong: {ms_global}) wd={proto['weight_decay']}")
         run_training(model, loaders, args, device,
                      epochs, args.lr or proto["lr"],
                      milestones, "finetune", wandb=wandb, cfg=cfg, epoch_offset=spent)
