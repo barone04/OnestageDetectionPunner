@@ -235,6 +235,11 @@ def run_training(model, loaders, args, device, epochs, lr, milestones, tag, prun
             torch.save({"model": model.state_dict(), "config": cfg or model.config(),
                         "top1": best, "epoch": ep},
                        os.path.join(args.output_dir, "model_best.pth"))
+    # `best_top1` moi la con so dat canh bang published: HRank/CORING bao `best_prec1`,
+    # tuc top-1 CAO NHAT tren tap test. Summary cua wandb chi giu val/acc epoch cuoi.
+    if wandb:
+        wandb.summary["best_top1"] = best
+        wandb.summary[f"best_top1_{tag}"] = best
     print(f"[{tag}] best top1 = {best:.2f}%")
     return best
 
