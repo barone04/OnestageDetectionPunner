@@ -369,11 +369,13 @@ def main():
         # Bi-level la iterative nen tieu mot phan ngay trong vong prune -> ghi lai
         # de mode=finetune tru ra, neu khong bi-level duoc nhieu epoch hon baseline.
         prune_epochs = args.prune_iters * args.prune_finetune_epochs
-        print(f"Ngan sach '{args.protocol}' = {proto['epochs']} ep | "
+        budget = args.budget or proto["epochs"]
+        print(f"Ngan sach '{args.protocol}' = {budget} ep"
+              f"{' (--budget, mac dinh %d)' % proto['epochs'] if args.budget else ''} | "
               f"vong prune tieu {prune_epochs} ep | con lai cho finetune "
-              f"{proto['epochs'] - prune_epochs} ep")
-        assert prune_epochs < proto["epochs"], (
-            f"Vong prune ({prune_epochs} ep) da vuot ngan sach {proto['epochs']} ep")
+              f"{budget - prune_epochs} ep")
+        assert prune_epochs < budget, (
+            f"Vong prune ({prune_epochs} ep) da vuot ngan sach {budget} ep")
 
         criterion = nn.CrossEntropyLoss()
         u_pruner, s_pruner = UnstructuredPruner(model), StructuredPruner(model)
@@ -416,6 +418,7 @@ def main():
                        "prune_epochs": prune_epochs,
                        "target_sparsity": args.target_sparsity,
                        "variant": "structured-only" if args.no_unstructured else "bi-level",
+                       "budget": budget,
                        }, f, indent=2)
         if wandb:
             wandb.summary.update({
@@ -425,6 +428,7 @@ def main():
                 "dense_params_M": p0, "dense_macs_M": m0,
                 "target_sparsity": args.target_sparsity,
                 "variant": "structured-only" if args.no_unstructured else "bi-level",
+                "budget": budget,
                 "unstructured_sparsity": 0.0 if args.no_unstructured
                                          else u_pruner.global_sparsity(),
             })
