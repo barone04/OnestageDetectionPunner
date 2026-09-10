@@ -29,13 +29,23 @@ class StructuredPruner:
 
     @torch.no_grad()
     def prune(self, prune_ratio=0.3, verbose=True):
+        """prune_ratio: mot so (ap deu moi lop) HOAC list/tuple mot ti le cho tung lop.
+
+        List cho phep cat nhe o lop nong / nang o lop sau — dung y tuong nhu lich
+        [0.]+[0.4]*2+[0.5]*9+[0.6]*9+[0.7]*9 ma CHIP/CORING cong bo. Tieu chi chon
+        filter (khoang cach L1-inf-inf + norm) KHONG doi.
+        """
         convs = self.model.get_prunable_layers(pruning_type="structured")
+        ratios = (list(prune_ratio) if isinstance(prune_ratio, (list, tuple))
+                  else [prune_ratio] * len(convs))
+        assert len(ratios) == len(convs), (
+            f"prune_ratio co {len(ratios)} muc nhung model co {len(convs)} lop prunable")
         total_pruned = 0
 
-        for layer in convs:
+        for layer, ratio in zip(convs, ratios):
             weight = get_weight(layer)
             n = weight.shape[0]
-            num_to_remove = int(round(n * prune_ratio))
+            num_to_remove = int(round(n * ratio))
 
             if num_to_remove <= 0:
                 layer.mask_handler.update(torch.ones(n, device=weight.device))
@@ -82,5 +92,7 @@ class StructuredPruner:
             total_pruned += count
 
         if verbose:
-            print(f"[Filter L1-inf-inf] ratio={prune_ratio:.3f} -> pruned {total_pruned} filters "
+            desc = (f"{min(ratios):.3f}..{max(ratios):.3f}" if len(set(ratios)) > 1
+                    else f"{ratios[0]:.3f}")
+            print(f"[Filter L1-inf-inf] ratio={desc} -> pruned {total_pruned} filters "
                   f"over {len(convs)} layers.")
