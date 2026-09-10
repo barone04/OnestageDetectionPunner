@@ -2,7 +2,7 @@
 cifar.py — Benchmark bi-level pruning tren CIFAR-10/100 (VGG16-BN, ResNet-56).
 
 Muc dich: chung minh method tai lap duoc tren benchmark chuan, de so voi so PUBLISHED
-cua L1 / HRank / GAL / SSS / SPSRC... ma khong phai chay lai tung baseline.
+cua L1 / HRank / CHIP / CORING... ma khong phai chay lai tung baseline.
 
 Protocol doi chieu tu repo CORING (github.com/vantienpham/CORING, dong HRank):
   - transform: RandomCrop(32, pad=4) + HFlip + Normalize(mean .4914/.4822/.4465,
@@ -10,14 +10,14 @@ Protocol doi chieu tu repo CORING (github.com/vantienpham/CORING, dong HRank):
   - dense (train tu scratch): SGD 0.9, wd 1e-4, batch 128,
     VGG16-BN 164 ep lr 0.1 x0.1@81,122 | ResNet-56 200 ep lr 0.1 x0.1@60,120,160
   - finetune sau prune: xem FINETUNE_PROTO — "coring" (300 ep, lr 0.01, @150,225,
-    wd 5e-3) hoac "spsrc" (80 ep, lr 0.001, @20, wd 1e-4). CHON TRUOC KHI SO BANG:
-    so cua bi-level voi 80 ep khong so duoc voi so cua CORING voi 300 ep.
-  - GATE: mode=dense dung lai neu top-1 lech >0.5% so voi DENSE_TARGET. Dense sai
-    moc thi moi so lieu prune ben tren deu vo nghia.
-  - NGAN SACH EPOCH: baseline (CORING) la one-shot -> prune 1 lan roi finetune 300 ep.
-    Bi-level la iterative -> tieu prune_iters * prune_finetune_epochs epoch NGAY TRONG
-    vong prune. So epoch do duoc ghi vao model_lean.json va mode=finetune TRU RA, nen
-    tong epoch sau khi roi dense checkpoint bang dung baseline. --ignore-budget de tat.
+    wd 5e-3) hoac "spsrc" (80 ep, lr 0.001, @20, wd 1e-4).
+  - GATE: mode=dense dung lai neu top-1 lech >0.5% so voi DENSE_TARGET.
+  - NGAN SACH EPOCH: CORING one-shot -> prune 1 lan roi finetune 300 ep. Bi-level la
+    iterative -> tieu prune_iters * prune_finetune_epochs epoch ngay trong vong prune;
+    so do ghi vao model_lean.json va mode=finetune TRU RA nen tong bang baseline.
+    --budget N doi tong ngan sach (milestone keo theo ti le), --ignore-budget de tat.
+  - PHAN BO THEO LOP: xem LAYER_SCHEDULES. Chi doi "cat bao nhieu o dau", tieu chi
+    chon filter nao (L1-inf-inf + norm) va co che bi-level KHONG doi.
 
 Vi du:
   python cifar.py --mode dense --model resnet56 --output-dir ./output/cifar/r56_dense
@@ -130,7 +130,35 @@ def count_cost(model, device):
     return params, total[0] / 1e6
 
 
-def sparsity_for_target(cfg, target, metric="macs", lo=0.01, hi=0.95, iters=14):
+# Phan bo ti le cat theo STAGE (chi doi "cat bao nhieu o dau", KHONG doi tieu chi
+# chon filter nao). Gia tri la HINH DANG tuong doi, duoc chuan hoa ve max=1 roi nhan
+# voi target_sparsity -> nen target_sparsity van la "muc cat cua lop nang nhat".
+#   uniform : cat deu moi lop (hanh vi cu).
+#   chip    : hinh dang cua CHIP/CORING [0.5]*9+[0.6]*9+[0.7]*9 — nhe o stage nong.
+#   steep   : chenh lech manh hon nua, de stage1 gan nhu nguyen ven.
+LAYER_SCHEDULES = {
+    "uniform": None,
+    "chip":  (0.5, 0.6, 0.7),
+    "steep": (0.3, 0.6, 0.8),
+}
+RATIO_CAP = 0.9      # khong cat qua 90% mot lop, du scale co keo len bao nhieu
+
+
+def layer_ratios(cfg, schedule, scale):
+    """Tra ve list ti le cat cho tung lop prunable, theo lich + he so scale."""
+    n = len(build_cifar_model(cfg).get_prunable_layers("structured"))
+    shape = LAYER_SCHEDULES[schedule]
+    if shape is None:
+        return [min(scale, RATIO_CAP)] * n
+    if cfg.get("family") != "resnet" or n % len(shape):
+        raise SystemExit(f"lich '{schedule}' can resnet co {len(shape)} stage deu nhau "
+                         f"(dang co {n} lop prunable)")
+    per, mx = n // len(shape), max(shape)
+    return [min(round(w / mx * scale, 4), RATIO_CAP) for w in shape for _ in range(per)]
+
+
+def sparsity_for_target(cfg, target, metric="macs", schedule="uniform",
+                        lo=0.01, hi=0.95, iters=14):
     """Tim target_sparsity de lean model rot dung diem nen cua baseline (iso-FLOPs).
 
     Chay duoc ma KHONG can train vi so kenh con lai chi phu thuoc prune_ratio:
@@ -141,7 +169,7 @@ def sparsity_for_target(cfg, target, metric="macs", lo=0.01, hi=0.95, iters=14):
 
     def cost_at(r):
         m = build_cifar_model(cfg)
-        StructuredPruner(m).prune(prune_ratio=r, verbose=False)
+        StructuredPruner(m).prune(prune_ratio=layer_ratios(cfg, schedule, r), verbose=False)
         lean, _ = convert_to_lean_cifar(m)
         p, mac = count_cost(lean, cpu)
         return p if metric == "params" else mac
@@ -158,8 +186,10 @@ def sparsity_for_target(cfg, target, metric="macs", lo=0.01, hi=0.95, iters=14):
             hi = mid
     best = round((lo + hi) / 2, 3)
     got = cost_at(best)
-    print(f"[match] target {metric}={target} -> target-sparsity={best} "
-          f"(dat {got:.2f}, lech {100*(got-target)/target:+.2f}%)")
+    r = layer_ratios(cfg, schedule, best)
+    print(f"[match] target {metric}={target} | lich '{schedule}' -> target-sparsity={best} "
+          f"(ti le thuc {min(r):.3f}..{max(r):.3f}, dat {got:.2f}, "
+          f"lech {100*(got-target)/target:+.2f}%)")
     if abs(got - target) / target > 0.02:
         print(f"[match] CANH BAO: lech >2% — grid kenh qua tho de khop diem nay")
     return best
@@ -271,6 +301,9 @@ def get_args():
     p.add_argument("--prune-iters", default=5, type=int)
     p.add_argument("--prune-finetune-epochs", default=3, type=int)
     p.add_argument("--sensitivity-mult", default=2.0, type=float)
+    p.add_argument("--layer-schedule", default="uniform", choices=list(LAYER_SCHEDULES),
+                   help="phan bo ti le cat theo stage. Chi doi CAT BAO NHIEU O DAU; "
+                        "tieu chi chon filter nao khong doi. Xem LAYER_SCHEDULES.")
     p.add_argument("--no-unstructured", action="store_true",
                    help="tat muc unstructured -> bien the STRUCTURED-ONLY, cung loai voi "
                         "CORING/HRank. Bat buoc cho bang so sanh chinh; bi-level day du "
@@ -362,7 +395,7 @@ def main():
         if args.match_macs or args.match_params:
             args.target_sparsity = sparsity_for_target(
                 dense_cfg, args.match_macs or args.match_params,
-                "macs" if args.match_macs else "params")
+                "macs" if args.match_macs else "params", args.layer_schedule)
 
         proto = FINETUNE_PROTO[args.protocol]
         # Ngan sach epoch SAU khi roi dense checkpoint phai bang cua baseline.
@@ -389,7 +422,7 @@ def main():
             if not args.no_unstructured:
                 u_pruner.prune(sensitivity=args.sensitivity_mult * sparsity)
                 print(f"  Song Han global sparsity={u_pruner.global_sparsity():.3f}")
-            s_pruner.prune(prune_ratio=sparsity)
+            s_pruner.prune(prune_ratio=layer_ratios(dense_cfg, args.layer_schedule, sparsity))
             for ep in range(args.prune_finetune_epochs):
                 tr_loss, tr_acc = train_one_epoch(
                     model, criterion, loaders[0], optimizer, device,
@@ -419,6 +452,8 @@ def main():
                        "target_sparsity": args.target_sparsity,
                        "variant": "structured-only" if args.no_unstructured else "bi-level",
                        "budget": budget,
+                "layer_schedule": args.layer_schedule,
+                       "layer_schedule": args.layer_schedule,
                        }, f, indent=2)
         if wandb:
             wandb.summary.update({
@@ -429,6 +464,7 @@ def main():
                 "target_sparsity": args.target_sparsity,
                 "variant": "structured-only" if args.no_unstructured else "bi-level",
                 "budget": budget,
+                "layer_schedule": args.layer_schedule,
                 "unstructured_sparsity": 0.0 if args.no_unstructured
                                          else u_pruner.global_sparsity(),
             })
