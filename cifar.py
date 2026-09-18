@@ -16,8 +16,10 @@ Protocol doi chieu tu repo CORING (github.com/vantienpham/CORING, dong HRank):
     iterative -> tieu prune_iters * prune_finetune_epochs epoch ngay trong vong prune;
     so do ghi vao model_lean.json va mode=finetune TRU RA nen tong bang baseline.
     --budget N doi tong ngan sach (milestone keo theo ti le), --ignore-budget de tat.
-  - PHAN BO THEO LOP: xem LAYER_SCHEDULES. Chi doi "cat bao nhieu o dau", tieu chi
-    chon filter nao (L1-inf-inf + norm) va co che bi-level KHONG doi.
+  - PHAN BO THEO LOP (A: cat BAO NHIEU): xem LAYER_SCHEDULES. 'sensitivity' = de xuat #2,
+    ti le moi lop tinh tu do nhay do bang chinh thao tac cua tang 1 (--alpha).
+  - CHON FILTER (C: giet CAI NAO trong cap du thua): --kill-by norm|density. 'density' =
+    de xuat #3. Tim cap du thua (B) van bang khoang cach L1-inf-inf, khong doi.
 
 Vi du:
   python cifar.py --mode dense --model resnet56 --output-dir ./output/cifar/r56_dense
@@ -136,20 +138,83 @@ def count_cost(model, device):
 #   uniform : cat deu moi lop (hanh vi cu).
 #   chip    : hinh dang cua CHIP/CORING [0.5]*9+[0.6]*9+[0.7]*9 — nhe o stage nong.
 #   steep   : chenh lech manh hon nua, de stage1 gan nhu nguyen ven.
+#   sensitivity : KHONG phai hinh dang co dinh — 1 ti le cho TUNG lop, tinh tu do nhay
+#                 do duoc (xem layer_sensitivity). Can truyen sens_w.
 LAYER_SCHEDULES = {
     "uniform": None,
     "chip":  (0.5, 0.6, 0.7),
     "steep": (0.3, 0.6, 0.8),
+    "sensitivity": "measured",
 }
 RATIO_CAP = 0.9      # khong cat qua 90% mot lop, du scale co keo len bao nhieu
 
 
-def layer_ratios(cfg, schedule, scale):
+def calib_batch(data_path, dataset, n):
+    """n anh TRAIN dau tien, transform cua TEST (khong augment) -> tensor co dinh.
+
+    Dung tap train chu khong phai test: ra quyet dinh cho method bang tap test la
+    chon model bang chinh tap danh gia.
+    """
+    import torchvision
+    import torchvision.transforms as T
+    tf = T.Compose([T.ToTensor(), T.Normalize(CIFAR_MEAN, CIFAR_STD)])
+    cls = torchvision.datasets.CIFAR100 if dataset == "cifar100" else torchvision.datasets.CIFAR10
+    ds = cls(data_path, train=True, download=True, transform=tf)
+    return torch.stack([ds[i][0] for i in range(n)])
+
+
+@torch.no_grad()
+def layer_sensitivity(model, x, probe=0.7, bs=256):
+    """Do nhay cua TUNG lop prunable voi chinh thao tac cua tang 1.
+
+    Voi moi lop, rieng le: zero-hoa `probe` phan trong so co |w| nho nhat (= thao tac
+    unstructured), do KL(output goc || output sau) tren x, roi khoi phuc.
+    Tra ve list KL, mot so moi lop, cung thu tu get_prunable_layers("structured").
+    """
+    import torch.nn.functional as F
+    model.eval()
+
+    def logp():
+        return torch.cat([F.log_softmax(model(x[i:i + bs]), 1) for i in range(0, len(x), bs)])
+
+    ref = logp()
+    out = []
+    for L in model.get_prunable_layers("structured"):
+        w = L.conv.weight.data
+        saved = w.clone()
+        k = max(int(w.numel() * probe), 1)
+        thr = w.abs().flatten().kthvalue(k).values
+        w.mul_((w.abs() > thr).float())
+        out.append(F.kl_div(logp(), ref, log_target=True, reduction="batchmean").item())
+        w.copy_(saved)
+    return out
+
+
+def sens_weights(kl, alpha):
+    """KL -> trong so cat tuong doi (lop it nhay = 1.0, cat nhieu nhat).
+
+    w = (1 / (KL + eps)) ** alpha, eps = median(KL).
+      - alpha = 0 -> moi lop bang nhau = uniform; alpha = 1 -> theo sat do nhay.
+      - eps = median (khong phai 0.1*median): lop co KL ~ 0 khong bi coi la "vo cung
+        du thua". Voi 0.1*median, stage1-blk8 (KL=0.0) bi cat con 2/16 kenh.
+    """
+    import statistics
+    eps = max(statistics.median(kl), 1e-12)
+    w = [(1.0 / (v + eps)) ** alpha for v in kl]
+    mx = max(w)
+    return [v / mx for v in w]
+
+
+def layer_ratios(cfg, schedule, scale, sens_w=None):
     """Tra ve list ti le cat cho tung lop prunable, theo lich + he so scale."""
     n = len(build_cifar_model(cfg).get_prunable_layers("structured"))
     shape = LAYER_SCHEDULES[schedule]
     if shape is None:
         return [min(scale, RATIO_CAP)] * n
+    if shape == "measured":
+        assert sens_w is not None and len(sens_w) == n, (
+            "lich 'sensitivity' can sens_w (1 so moi lop) — goi layer_sensitivity truoc")
+        return [min(round(w * scale, 4), RATIO_CAP) for w in sens_w]
     if cfg.get("family") != "resnet" or n % len(shape):
         raise SystemExit(f"lich '{schedule}' can resnet co {len(shape)} stage deu nhau "
                          f"(dang co {n} lop prunable)")
@@ -158,7 +223,7 @@ def layer_ratios(cfg, schedule, scale):
 
 
 def sparsity_for_target(cfg, target, metric="macs", schedule="uniform",
-                        lo=0.01, hi=0.95, iters=14):
+                        lo=0.01, hi=0.95, iters=14, sens_w=None):
     """Tim target_sparsity de lean model rot dung diem nen cua baseline (iso-FLOPs).
 
     Chay duoc ma KHONG can train vi so kenh con lai chi phu thuoc prune_ratio:
@@ -166,10 +231,14 @@ def sparsity_for_target(cfg, target, metric="macs", schedule="uniform",
     => cost(ratio) don dieu giam -> chia doi ~14 lan la du.
     """
     cpu = torch.device("cpu")
+    if sens_w is not None:
+        # scale co the > 1: lop nhay nhat (w nho) can scale lon moi cham tran RATIO_CAP
+        hi = RATIO_CAP / max(min(sens_w), 1e-6)
 
     def cost_at(r):
         m = build_cifar_model(cfg)
-        StructuredPruner(m).prune(prune_ratio=layer_ratios(cfg, schedule, r), verbose=False)
+        StructuredPruner(m).prune(prune_ratio=layer_ratios(cfg, schedule, r, sens_w),
+                                  verbose=False)
         lean, _ = convert_to_lean_cifar(m)
         p, mac = count_cost(lean, cpu)
         return p if metric == "params" else mac
@@ -186,7 +255,7 @@ def sparsity_for_target(cfg, target, metric="macs", schedule="uniform",
             hi = mid
     best = round((lo + hi) / 2, 3)
     got = cost_at(best)
-    r = layer_ratios(cfg, schedule, best)
+    r = layer_ratios(cfg, schedule, best, sens_w)
     print(f"[match] target {metric}={target} | lich '{schedule}' -> target-sparsity={best} "
           f"(ti le thuc {min(r):.3f}..{max(r):.3f}, dat {got:.2f}, "
           f"lech {100*(got-target)/target:+.2f}%)")
@@ -302,8 +371,20 @@ def get_args():
     p.add_argument("--prune-finetune-epochs", default=3, type=int)
     p.add_argument("--sensitivity-mult", default=2.0, type=float)
     p.add_argument("--layer-schedule", default="uniform", choices=list(LAYER_SCHEDULES),
-                   help="phan bo ti le cat theo stage. Chi doi CAT BAO NHIEU O DAU; "
-                        "tieu chi chon filter nao khong doi. Xem LAYER_SCHEDULES.")
+                   help="phan bo ti le cat theo lop. Chi doi CAT BAO NHIEU O DAU; "
+                        "tieu chi chon filter nao khong doi. 'sensitivity' = tu do nhay do "
+                        "duoc (de xuat #2). Xem LAYER_SCHEDULES.")
+    p.add_argument("--alpha", default=0.5, type=float,
+                   help="chi cho --layer-schedule sensitivity: 0 = uniform, 1 = theo sat "
+                        "do nhay. Xem sens_weights.")
+    p.add_argument("--probe-sparsity", default=0.7, type=float,
+                   help="chi cho sensitivity: ti le trong so zero-hoa khi do nhay tung lop")
+    p.add_argument("--calib-images", default=2000, type=int,
+                   help="chi cho sensitivity: so anh TRAIN dung de do nhay")
+    p.add_argument("--kill-by", default="norm", choices=["norm", "density"],
+                   help="trong cap filter du thua, giet cai nao. 'density' = cai co it trong "
+                        "so khac 0 hon sau tang unstructured (de xuat #3). Tim cap du thua "
+                        "van bang khoang cach L1-inf-inf.")
     p.add_argument("--no-unstructured", action="store_true",
                    help="tat muc unstructured -> bien the STRUCTURED-ONLY, cung loai voi "
                         "CORING/HRank. Bat buoc cho bang so sanh chinh; bi-level day du "
@@ -391,11 +472,33 @@ def main():
         p0, m0 = count_cost(model, device)
         print(f"Dense: {p0:.2f}M params | {m0:.2f}M MACs")
 
+        # De xuat #2: do nhay tung lop tren DENSE (truoc khi cat gi ca), bang chinh thao
+        # tac cua tang 1, roi doi thanh trong so phan bo ti le cat cho tang 2.
+        sens_w, sens_kl = None, None
+        if args.layer_schedule == "sensitivity":
+            t0 = time.time()
+            xc = calib_batch(args.data_path, args.dataset, args.calib_images).to(device)
+            sens_kl = layer_sensitivity(model, xc, probe=args.probe_sparsity)
+            sens_w = sens_weights(sens_kl, args.alpha)
+            del xc
+            print(f"[sensitivity] {len(sens_kl)} lop, {args.calib_images} anh, "
+                  f"probe={args.probe_sparsity}, alpha={args.alpha} ({time.time()-t0:.0f}s)")
+            print(f"  KL x1000: min {1000*min(sens_kl):.2f} | max {1000*max(sens_kl):.2f}"
+                  f" | trong so cat: min {min(sens_w):.3f} .. max {max(sens_w):.3f}")
+            with open(os.path.join(args.output_dir, "sensitivity.json"), "w") as f:
+                json.dump({"kl": sens_kl, "weights": sens_w, "alpha": args.alpha,
+                           "probe_sparsity": args.probe_sparsity,
+                           "calib_images": args.calib_images}, f, indent=2)
+
         # match iso-FLOPs voi diem nen cua baseline (khong ton GPU, xem sparsity_for_target)
         if args.match_macs or args.match_params:
             args.target_sparsity = sparsity_for_target(
                 dense_cfg, args.match_macs or args.match_params,
-                "macs" if args.match_macs else "params", args.layer_schedule)
+                "macs" if args.match_macs else "params", args.layer_schedule,
+                sens_w=sens_w)
+        elif args.layer_schedule == "sensitivity":
+            print("[sensitivity] CANH BAO: khong co --match-macs -> target-sparsity la "
+                  "muc cat cua lop IT NHAY NHAT, tong muc nen se thap hon uniform.")
 
         proto = FINETUNE_PROTO[args.protocol]
         # Ngan sach epoch SAU khi roi dense checkpoint phai bang cua baseline.
@@ -422,7 +525,9 @@ def main():
             if not args.no_unstructured:
                 u_pruner.prune(sensitivity=args.sensitivity_mult * sparsity)
                 print(f"  Song Han global sparsity={u_pruner.global_sparsity():.3f}")
-            s_pruner.prune(prune_ratio=layer_ratios(dense_cfg, args.layer_schedule, sparsity))
+            s_pruner.prune(prune_ratio=layer_ratios(dense_cfg, args.layer_schedule,
+                                                    sparsity, sens_w),
+                           kill_by=args.kill_by)
             for ep in range(args.prune_finetune_epochs):
                 tr_loss, tr_acc = train_one_epoch(
                     model, criterion, loaders[0], optimizer, device,
@@ -452,8 +557,9 @@ def main():
                        "target_sparsity": args.target_sparsity,
                        "variant": "structured-only" if args.no_unstructured else "bi-level",
                        "budget": budget,
-                "layer_schedule": args.layer_schedule,
                        "layer_schedule": args.layer_schedule,
+                       "kill_by": args.kill_by,
+                       "alpha": args.alpha if sens_w is not None else None,
                        }, f, indent=2)
         if wandb:
             wandb.summary.update({
@@ -465,9 +571,19 @@ def main():
                 "variant": "structured-only" if args.no_unstructured else "bi-level",
                 "budget": budget,
                 "layer_schedule": args.layer_schedule,
+                "kill_by": args.kill_by,
+                "alpha": args.alpha if sens_w is not None else None,
                 "unstructured_sparsity": 0.0 if args.no_unstructured
                                          else u_pruner.global_sparsity(),
             })
+            if sens_kl is not None:
+                # bang do nhay tung lop -> xem duoc tren wandb ma khong can mo file
+                wandb.log({"sensitivity/per_layer": wandb.Table(
+                    columns=["layer", "kl", "cut_weight", "ratio"],
+                    data=[[i, k, w, r] for i, (k, w, r) in enumerate(zip(
+                        sens_kl, sens_w,
+                        layer_ratios(dense_cfg, args.layer_schedule,
+                                     args.target_sparsity, sens_w)))])})
 
     # ---------------- finetune lean ----------------
     else:
