@@ -500,6 +500,23 @@ def main():
             print("[sensitivity] CANH BAO: khong co --match-macs -> target-sparsity la "
                   "muc cat cua lop IT NHAY NHAT, tong muc nen se thap hon uniform.")
 
+        # Cuong do tang unstructured (tang 1) PHAI doc lap voi lich phan bo cua tang 2.
+        # Voi lich khac uniform, target_sparsity la SCALE (muc cat cua lop it nhay nhat),
+        # khong phai muc cat trung binh -> neu dung no cho tang 1 thi tang 1 bi cat manh
+        # hon (do o diem 27%: 80.2% vs 73.7% zero) va ablation #2 bi nhieu. Nen tang 1
+        # dung ti le ma lich UNIFORM can de dat CUNG muc nen -> hai run chi khac tang 2.
+        u_level = args.target_sparsity
+        if args.layer_schedule != "uniform":
+            if args.match_macs or args.match_params:
+                u_level = sparsity_for_target(
+                    dense_cfg, args.match_macs or args.match_params,
+                    "macs" if args.match_macs else "params", "uniform")
+            else:
+                r = layer_ratios(dense_cfg, args.layer_schedule, args.target_sparsity, sens_w)
+                u_level = sum(r) / len(r)
+            print(f"[tang 1] dung muc tuong duong uniform = {u_level:.3f} "
+                  f"(khong phai scale {args.target_sparsity:.3f} cua lich '{args.layer_schedule}')")
+
         proto = FINETUNE_PROTO[args.protocol]
         # Ngan sach epoch SAU khi roi dense checkpoint phai bang cua baseline.
         # Bi-level la iterative nen tieu mot phan ngay trong vong prune -> ghi lai
@@ -523,7 +540,8 @@ def main():
             sparsity = args.target_sparsity * (it + 1) / args.prune_iters
             print(f"\n=== Prune iter {it+1}/{args.prune_iters} | sparsity={sparsity:.3f} ===")
             if not args.no_unstructured:
-                u_pruner.prune(sensitivity=args.sensitivity_mult * sparsity)
+                u_sp = u_level * (it + 1) / args.prune_iters     # cung doc ramp voi tang 2
+                u_pruner.prune(sensitivity=args.sensitivity_mult * u_sp)
                 print(f"  Song Han global sparsity={u_pruner.global_sparsity():.3f}")
             s_pruner.prune(prune_ratio=layer_ratios(dense_cfg, args.layer_schedule,
                                                     sparsity, sens_w),
@@ -560,6 +578,7 @@ def main():
                        "layer_schedule": args.layer_schedule,
                        "kill_by": args.kill_by,
                        "alpha": args.alpha if sens_w is not None else None,
+                       "unstructured_level": None if args.no_unstructured else u_level,
                        }, f, indent=2)
         if wandb:
             wandb.summary.update({
@@ -573,6 +592,7 @@ def main():
                 "layer_schedule": args.layer_schedule,
                 "kill_by": args.kill_by,
                 "alpha": args.alpha if sens_w is not None else None,
+                "unstructured_level": None if args.no_unstructured else u_level,
                 "unstructured_sparsity": 0.0 if args.no_unstructured
                                          else u_pruner.global_sparsity(),
             })
