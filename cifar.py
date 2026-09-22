@@ -10,7 +10,8 @@ Protocol doi chieu tu repo CORING (github.com/vantienpham/CORING, dong HRank):
   - dense (train tu scratch): SGD 0.9, wd 1e-4, batch 128,
     VGG16-BN 164 ep lr 0.1 x0.1@81,122 | ResNet-56 200 ep lr 0.1 x0.1@60,120,160
   - finetune sau prune: xem FINETUNE_PROTO — "coring" (300 ep, lr 0.01, @150,225,
-    wd 5e-3) hoac "spsrc" (80 ep, lr 0.001, @20, wd 1e-4).
+    wd 5e-3, theo script), "chip" (400 ep, lr 0.01 cosine, wd 5e-3, bs 256 — recipe
+    CORING that su chay) hoac "spsrc" (80 ep, lr 0.001, @20, wd 1e-4).
   - GATE: mode=dense dung lai neu top-1 lech >0.5% so voi DENSE_TARGET.
   - NGAN SACH EPOCH: CORING one-shot -> prune 1 lan roi finetune 300 ep. Bi-level la
     iterative -> tieu prune_iters * prune_finetune_epochs epoch ngay trong vong prune;
@@ -32,6 +33,7 @@ Vi du:
 import os
 import re
 import json
+import math
 import time
 import argparse
 
@@ -60,6 +62,10 @@ FINETUNE_PROTO = {
     "coring": dict(lr=0.01, epochs=300, milestones=[150, 225], weight_decay=5e-3),
     # SPSRC: "same optimization setting as baseline but lr 0.001, decaying at 20th epoch"
     "spsrc":  dict(lr=0.001, epochs=80, milestones=[20], weight_decay=1e-4),
+    # Recipe CORING THUC SU chay (fit nguoc tu lr trong checkpoint cua ho, xem
+    # docs/sota_resnet56_cifar10.md §6) = recipe CHIP: cosine 0.01 -> 0 tren 400 ep, bs 256.
+    # milestones=None -> cosine tren truc tong ngan sach.
+    "chip":   dict(lr=0.01, epochs=400, milestones=None, weight_decay=5e-3, batch_size=256),
 }
 
 # Muc tieu dense phai dat truoc khi duoc phep prune (top-1 %), theo tung dong paper
@@ -314,12 +320,18 @@ def wandb_log_epoch(wandb, stage, ep, lr, tr_loss, tr_acc, va_loss, va_acc):
 
 
 def run_training(model, loaders, args, device, epochs, lr, milestones, tag, pruner=None,
-                 wandb=None, cfg=None, epoch_offset=0):
+                 wandb=None, cfg=None, epoch_offset=0, cosine_total=None):
+    """milestones=None -> cosine lr -> 0 tren truc TONG: epoch t_global = epoch_offset + ep,
+    chu ky cosine_total. Vong prune da tieu epoch_offset ep -> finetune bat dau giua duong cong."""
     train_loader, val_loader = loaders
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=args.momentum,
                                 weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones, gamma=0.1)
+    if milestones is None:
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lambda ep: 0.5 * (1 + math.cos(math.pi * (epoch_offset + ep) / cosine_total)))
+    else:
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones, gamma=0.1)
 
     best = 0.0
     for ep in range(epochs):
@@ -357,7 +369,8 @@ def get_args():
                         "phat voi baseline. Thay cho --checkpoint.")
     p.add_argument("--lean", default=None, help="lean ckpt (mode=finetune)")
     # protocol chuan — chi doi khi co ly do, doi la mat tinh so sanh voi so published
-    p.add_argument("--batch-size", default=128, type=int)
+    p.add_argument("--batch-size", default=None, type=int,
+                   help="None -> batch_size cua protocol (chip 256) khi prune/finetune, 128 con lai")
     p.add_argument("--lr", default=None, type=float, help="None -> 0.1 (dense) / 0.001 (finetune)")
     p.add_argument("--epochs", default=None, type=int, help="None -> lich chuan theo model")
     p.add_argument("--momentum", default=0.9, type=float)
@@ -397,7 +410,7 @@ def get_args():
                    help="l1a = cung tap layer voi L1 (VGG-16-pruned-A)")
     p.add_argument("--vgg-head", default="hrank", choices=["hrank", "single"],
                    help="hrank = bien the cua HRank/CORING (14.98M); single = cua SPSRC (14.72M)")
-    p.add_argument("--protocol", default="coring", choices=["coring", "spsrc"],
+    p.add_argument("--protocol", default="coring", choices=list(FINETUNE_PROTO),
                    help="recipe finetune sau prune, xem FINETUNE_PROTO")
     p.add_argument("--budget", default=None, type=int,
                    help="Doi TONG ngan sach epoch (vong prune + finetune), milestone keo "
@@ -432,6 +445,9 @@ def main():
         rid = re.sub(r"[^A-Za-z0-9_-]", "_", name)   # wandb id: chi chu/so/-/_
         wandb.init(name=name, id=rid, resume="allow", config=vars(args))
 
+    if args.batch_size is None:
+        args.batch_size = (FINETUNE_PROTO[args.protocol].get("batch_size", 128)
+                           if args.mode != "dense" else 128)
     loaders = get_loaders(args.data_path, args.dataset, args.batch_size, args.workers)
     sched = DENSE_SCHED.get(args.model, DENSE_SCHED["resnet56"])
 
@@ -532,6 +548,8 @@ def main():
 
         criterion = nn.CrossEntropyLoss()
         u_pruner, s_pruner = UnstructuredPruner(model), StructuredPruner(model)
+        # ponytail: lr hang so trong vong prune ca voi 'chip' — 15/400 ep dau cosine chi
+        # tut 0.01 -> 0.0097; theo sat duong cong thi truyen them scheduler vao day.
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr or proto["lr"],
                                     momentum=args.momentum,
                                     weight_decay=proto["weight_decay"])
@@ -627,26 +645,27 @@ def main():
 
         spent = 0 if args.ignore_budget else int(cfg.get("prune_epochs", 0))
 
-        if args.budget:
+        total = args.budget or proto["epochs"]
+        if proto["milestones"] is None:
+            ms_global = milestones = None       # cosine: chu ky = total, offset = spent
+        else:
             # Doi tong ngan sach (vd --budget 400 de bang CHIP): GIU NGUYEN HINH DANG
             # lich lr bang cach keo milestone theo ti le, roi moi tru phan vong prune.
             # Khong lam vay thi --epochs 400 van dung milestone 135/210 -> lich lr sai.
-            k = args.budget / proto["epochs"]
-            total = args.budget
+            k = total / proto["epochs"]
             ms_global = [int(round(m * k)) for m in proto["milestones"]]
-        else:
-            total = proto["epochs"]
-            ms_global = list(proto["milestones"])
+            milestones = [max(m - spent, 1) for m in ms_global]
         epochs = args.epochs or max(total - spent, 1)
-        milestones = [max(m - spent, 1) for m in ms_global]
 
         print(f"Protocol '{args.protocol}': ngan sach {total} ep "
               f"- {spent} ep (vong prune) = {epochs} ep finetune | "
-              f"lr={args.lr or proto['lr']} milestones={milestones} "
-              f"(truc tong: {ms_global}) wd={proto['weight_decay']}")
+              f"lr={args.lr or proto['lr']} "
+              f"{'cosine T=%d tu ep %d' % (total, spent) if milestones is None else 'milestones=%s (truc tong: %s)' % (milestones, ms_global)} "
+              f"wd={proto['weight_decay']} bs={args.batch_size}")
         run_training(model, loaders, args, device,
                      epochs, args.lr or proto["lr"],
-                     milestones, "finetune", wandb=wandb, cfg=cfg, epoch_offset=spent)
+                     milestones, "finetune", wandb=wandb, cfg=cfg, epoch_offset=spent,
+                     cosine_total=total)
 
     if wandb:
         wandb.finish()
