@@ -75,21 +75,40 @@ regularizer cũng đạt được. Phải hơn rõ hơn thế, hoặc phải th�
 
 Baseline dense ~77.4–77.5.
 
+### B.1 — Các điểm CÙNG TRỤC (baseline 77.4–77.68, đều báo %FLOPs thật)
+
 | Method | Venue, năm | FLOPs↓ | Params↓ | mAP50 | Δ | Phạm vi | Link |
 |---|---|---|---|---|---|---|---|
-| Localization-aware CP | arXiv 2019 | 50% | 50% | 77.2 | −0.2 | conv1-1→conv5-3 | [1911.02237](https://arxiv.org/pdf/1911.02237) |
-| ThiNet (dòng so sánh) | " | 50% | 50% | 74.6 | −2.8 | " | " |
-| AIP | arXiv 2021 | 54.1% | 57.7% | 75.20 | −0.90 | `[?]` | [2108.13591](https://arxiv.org/pdf/2108.13591) |
-| PAGCP vòng 1 | TPAMI 2023 | 59.4% | 67.3% | 76.2 | −1.3 | **cả extras** | [2303.11923](https://arxiv.org/abs/2303.11923) |
-| PAGCP vòng 2 | " | 66.3% | 78.3% | 75.9 | −1.6 | " | " |
-| PAGCP vòng 3 | " | 71.1% | 82.1% | 75.7 | −1.8 | " | " |
-| PAGCP vòng 4 | " | **74.3%** | **85.6%** | 75.6 | −1.9 | " | " |
-| Localization-aware CP | arXiv 2019 | 75% | 75% | 75.2 | −2.2 | conv1-1→conv5-3 | [1911.02237](https://arxiv.org/pdf/1911.02237) |
-| ThiNet (dòng so sánh) | " | 75% | 75% | 72.7 | −4.7 | " | " |
+| OFP "Ours-0.05" | arXiv 2020 | 30.9% | 34.8% | **77.78** | **+0.10** (base 77.68) | filter trong SSD | [2010.06821](https://arxiv.org/abs/2010.06821) |
+| OFP "Ours-0.1" | " | 41.8% | 46.1% | 77.14 | −0.54 | " | " |
+| **LCP** | arXiv 2019 | 50% | 50% | **77.2** | **−0.2** (base 77.4) | backbone conv1-1→conv5-3 | [1911.02237](https://arxiv.org/abs/1911.02237) |
+| ThiNet (LCP chạy lại) | " | 50% | 50% | 74.6 | −2.8 | backbone | " |
+| MLP (PAGCP đo lại) | WACV 2019 | 57.1% | 85.2% | 75.0 | −2.5 (base 77.5) | filter ở conv liên tiếp | [2303.11923](https://arxiv.org/abs/2303.11923) |
+| **PAGCP vòng 1** | TPAMI 2023 | 59.4% | 67.3% | **76.2** | −1.3 (base 77.5) | **mọi lớp trừ output head** | " |
+| OFP "Ours-0.3" | arXiv 2020 | 61.1% | 64.7% | 76.45 | −1.23 | filter trong SSD | [2010.06821](https://arxiv.org/abs/2010.06821) |
+| **PAGCP vòng 2** | TPAMI 2023 | 66.3% | 78.3% | **75.9** | −1.6 | mọi lớp trừ head | [2303.11923](https://arxiv.org/abs/2303.11923) |
+| OFP "Ours-0.5" | arXiv 2020 | ~69.1% (tính lại) | ~73.9% (tính lại) | 75.83 | −1.85 | filter trong SSD | [2010.06821](https://arxiv.org/abs/2010.06821) |
+| **PAGCP vòng 3** | TPAMI 2023 | 71.1% | 82.1% | **75.7** | −1.8 | mọi lớp trừ head | [2303.11923](https://arxiv.org/abs/2303.11923) |
+| **PAGCP vòng 4** (dòng headline) | " | **74.3%** | **85.6%** | **75.6** | −1.9 | " | " |
+| LCP η=0.75 | arXiv 2019 | 75% | 75% | 75.2 | −2.2 (base 77.4) | backbone | [1911.02237](https://arxiv.org/abs/1911.02237) |
+| LCP (PAGCP đo lại) | — | 74.9% | 74.9% | 75.2 | −2.3 (base 77.5) | backbone | [2303.11923](https://arxiv.org/abs/2303.11923) |
+| ThiNet η=0.75 | arXiv 2019 | 75% | 75% | 72.7 | −4.7 | backbone | [1911.02237](https://arxiv.org/abs/1911.02237) |
+| ThiNet (PAGCP đo lại) | — | 74.9% | 74.9% | 72.7 | −4.8 | backbone | [2303.11923](https://arxiv.org/abs/2303.11923) |
 
-**Ưu:** PAGCP cho sẵn 4 mức → đã là một đường cong; có code công khai; là bài duy nhất prune cả phần
-extras của SSD. VOC rẻ hơn COCO nhiều.
-**Nhược:** đa số điểm là 2019–2021. Tốc độ 2.7–3.3× của PAGCP đo trên RTX 3090 / ARM / OpenCL.
+**Lưu ý quan trọng về PAGCP:** 4 điểm đó là **4 vòng liên tiếp của MỘT lần chạy** (Table IV), không
+phải 4 model được tinh chỉnh độc lập. Chỉ điểm cuối (75.6 @ 74.3%) là dòng PAGCP đặt vào bảng so sánh
+chính của họ.
+
+### B.2 — Các điểm KHÔNG ghép chung được
+
+| Method | Vì sao để riêng |
+|---|---|
+| **AIP** ([2108.13591](https://arxiv.org/abs/2108.13591)) 76.10 → 75.60 @30.3% / 75.20 @54.1% | Baseline 76.10 ở **11.34 GFLOPs**, trong khi mọi dòng SSD300-VGG16 khác ở ~31.4 GFLOPs. Bài còn ghi backbone "VGG-16 trained on CIFAR-100" và không nói split |
+| **Multi-layer Pruning** ([1811.08342](https://arxiv.org/abs/1811.08342)) 77.16 → 75.07 / 72.15 | **Không báo FLOPs**, chỉ báo params/kích thước. Và nó đổi kiến trúc (3 vs 6 lớp detection) |
+| **NNCF filter pruning 40%** (SSD300-VGG-**BN**) 78.28 → 78.35 / 77.72 | Biến thể có BN nên baseline khác; "40%" là mức **đếm filter**, không phải FLOPs; hai phiên bản NNCF cho hai số khác nhau |
+
+**Ưu của ô này:** rẻ nhất để chạy; PAGCP có code công khai và là bài duy nhất prune cả extras.
+**Nhược:** đa số điểm là 2019–2021; baseline dense trải từ 77.16 đến 78.28 nên phải lọc.
 
 ---
 
@@ -97,22 +116,47 @@ extras của SSD. VOC rẻ hơn COCO nhiều.
 
 Baseline dense 36.1–36.5 tuỳ bài. Giao thức gốc từ Group Fisher Pruning (ICML'21), vẫn dùng tới 2026.
 
-| Method | Venue, năm | FLOPs/MACs↓ | mAP | Δ | Phạm vi | Link |
-|---|---|---|---|---|---|---|
-| Info-theoretic "Ours-F" | arXiv 2024 | ~50% MACs | **37.6** | **+1.1** | backbone | [2408.16772](https://arxiv.org/abs/2408.16772) |
-| Info-theoretic "Ours-P" | " | ~50% MACs | 37.3 | +0.8 | " | " |
-| IFSO | arXiv 2023 | 50% | 36.30 | +0.20 | backbone + neck + head | [2308.06755](https://arxiv.org/abs/2308.06755) |
-| Group Fisher | ICML 2021 | 50% | 36.20 | +0.10 | `[?]` | [2108.00708](https://arxiv.org/abs/2108.00708) |
-| IFSO | arXiv 2023 | 60% | 35.70 | −0.40 | " | " |
-| Info-theoretic "Ours-N" | arXiv 2024 | ~50% MACs | 35.6 | −0.9 | " | " |
-| Group Fisher | ICML 2021 | 60% | 35.30 | −0.80 | `[?]` | " |
+### C.1 — Nhóm baseline 36.5 (GFP và bài info-theoretic, đều cắt 50%)
 
-**Kèm miễn phí 3 detector anchor-free** từ cùng bài info-theoretic, cùng COCO val2017, ~50% MACs:
+| Method | Venue, năm | FLOPs/MACs↓ | Params↓ | AP | Δ | Phạm vi | Link |
+|---|---|---|---|---|---|---|---|
+| **Info-theoretic "Ours-F"** | arXiv 2024 | 50% MACs | 32.7% | **37.6** | **+1.1** | mọi kênh | [2408.16772](https://arxiv.org/abs/2408.16772) |
+| **Info-theoretic "Ours-P"** | " | 50% MACs | 30.8% | **37.3** | **+0.8** | " | " |
+| GFP "Retina-F" | ICML 2021 | 50% | 31.0% | 36.8 | +0.3 | cả FPN + head, gom nhóm kênh coupled | [2108.00708](https://arxiv.org/abs/2108.00708) |
+| **GFP "Retina-M"** (bản chính) | " | 50% | 30.6% | **36.5** | **0.0** | " | " |
+| GFP "Retina-I" | " | 50% | 20.2% | 36.3 | −0.2 | chỉ kênh độc lập | " |
+| GFP "Retina-U" | " | 50% | 62.6% | 35.8 | −0.7 | cả FPN + head | " |
+| Info-theoretic "Ours-N" | arXiv 2024 | 50% MACs | 64.5% | 35.6 | −0.9 | mọi kênh | [2408.16772](https://arxiv.org/abs/2408.16772) |
+
+### C.2 — Nhóm baseline 36.10 (IFSO và bản IFSO chạy lại GFP)
+
+| Method | FLOPs↓ | AP | AP50 | AP75 | Δ | Link |
+|---|---|---|---|---|---|---|
+| **IFSO-50** | 50% | **36.30** | 55.60 | 38.70 | **+0.20** | [2308.06755](https://arxiv.org/abs/2308.06755) |
+| GFP-50 (IFSO chạy lại) | 50% | 36.20 | 55.50 | 38.50 | +0.10 | " |
+| **IFSO-60** | 60% | **35.70** | 54.70 | 38.00 | **−0.40** | " |
+| GFP-60 (IFSO chạy lại) | 60% | 35.30 | 54.60 | 37.40 | −0.80 | " |
+
+⚠️ **Tôi đã ghi sai ở bản trước.** Hai số "GFP 36.20 @50% / 35.30 @60%" **không phải của bài GFP gốc**
+mà là **bản IFSO chạy lại GFP theo baseline 36.10 của IFSO**. Bài GFP gốc (ICML'21) có baseline 36.5,
+bốn biến thể ở 50%, và **không có điểm 60% nào**.
+
+### C.3 — Không ghép chung được
+
+| Method | Vì sao để riêng |
+|---|---|
+| **PSE-Net / BCNet** ([2408.16233](https://arxiv.org/abs/2408.16233)) 36.4 → 35.9 / 35.4 | "50%" là FLOPs **của riêng backbone** (ResNet50 4G→2G ở scale phân loại), neck và head không đụng tới → FLOPs toàn detector giảm ít hơn nhiều |
+| **Anchor Pruning** ([2104.00432](https://arxiv.org/abs/2104.00432)) 36.9 → 35.1 | Prune **anchor ở head**, backbone nguyên vẹn; và đánh giá trên **test-dev2017**, không phải val2017 |
+
+**Kèm miễn phí 3 detector anchor-free** từ bài info-theoretic, cùng COCO val2017, 50% MACs:
 FSAF 37.4 → **38.0**; ATSS 38.1 → **39.1**; PAA 39.0 → **40.0**.
 
-**Lưu ý quan trọng:** ở mức ~50%, **ba trong bảy điểm có Δ dương**. Tức là ở vùng nén này RetinaNet
-còn dư thừa nhiều, prune còn giúp regularize. Muốn chứng minh phương pháp tốt thì phải đẩy lên 60–70%,
-nơi các điểm bắt đầu âm.
+**Hai nhận xét quan trọng:**
+1. Ở mức 50%, **5 trong 11 điểm có Δ ≥ 0**. RetinaNet ở vùng này còn dư thừa nhiều, prune còn giúp
+   regularize. Muốn chứng minh phương pháp thì phải đẩy lên **60–70%**, nơi các điểm bắt đầu âm —
+   nhưng hiện **chỉ IFSO có điểm 60%**, chưa ai có 70%. Đó là chỗ trống.
+2. **Không có bài nào mới hơn 2024** trong ô này. Agent chạy 4 lượt tìm mở rộng cho 2025–2026 và không
+   ra kết quả nào.
 
 ---
 
@@ -121,17 +165,35 @@ nơi các điểm bắt đầu âm.
 Baseline dense 77.98 (HALP) / 78.0 (MDP). Năm bài cùng dòng NVIDIA, dùng chung baseline — ô dày
 người nhất, nhưng **không ai báo %FLOPs**, nên không ghép thẳng vào trục của ô B/C được.
 
-| Method | Venue, năm | Trục của họ | mAP50 | Δ | Link |
-|---|---|---|---|---|---|
-| HALP | NeurIPS 2022 | 65.56 → 15.38 GFLOPs, ×1.94 (BS=1) | 77.42 | −0.56 | [2210.06659](https://arxiv.org/abs/2210.06659) |
-| SMCP | ECCV 2022 | ×2.12 | 78.3 `[?]` | `[?]` | [2211.02206](https://arxiv.org/abs/2211.02206) |
-| AdaSAP | ICLR 2024 | size ratio 0.40 | 79.5 | vs HALP 77.4 | [2306.14306](https://arxiv.org/abs/2306.14306) |
-| AdaSAP | " | size ratio 0.20 | 79.3 | vs HALP 77.0 | " |
-| MDP | CVPR 2025 | ×1.84 | **80.0** | **+2.0** | [2504.02168](https://arxiv.org/abs/2504.02168) |
-| IEE | WACV 2025 | — | `[?]` chỉ có hình scatter | `[?]` | [2502.03658](https://arxiv.org/abs/2502.03658) |
+| Method | Venue, năm | Trục của họ | FLOPs | mAP50 | Δ | Phạm vi | Link |
+|---|---|---|---|---|---|---|---|
+| **HALP** | NeurIPS 2022 | ×1.94 (BS=1) | **65.56 → 15.38 GFLOPs (−76.5%)**, 21.97 → 10.40M | 77.42 | −0.56 (dense 77.98) | **chỉ backbone** | [2210.06659](https://arxiv.org/abs/2210.06659) |
+| SMCP | ECCV 2022 | ×2.12, giảm 75% latency (TITAN V, BS=1) | **không báo** | 78.3 `[?]` | `[?]` | backbone + feature layers | [2211.02206](https://arxiv.org/abs/2211.02206) |
+| AdaSAP | ICLR 2024 | size ratio 0.40 | **không báo** | 79.5 | (HALP cùng mức: 77.4) | không nói | [2306.14306](https://arxiv.org/abs/2306.14306) |
+| AdaSAP | " | size ratio 0.20 | **không báo** | 79.3 | (HALP cùng mức: 77.0) | không nói | " |
+| MDP | CVPR 2025 | ×1.84 (TITAN V, BS=256) | **không báo** | **80.0** | **+2.0** (dense 78.0) | kênh + nguyên block | [2504.02168](https://arxiv.org/abs/2504.02168) |
+| MDP | " | ×2.14 | **không báo** | 79.2 | +1.2 | " | " |
+| IEE | WACV 2025 | — | **không báo** | `[?]` chỉ có hình scatter | `[?]` | không nói | [2502.03658](https://arxiv.org/abs/2502.03658) |
 
-**Cả 5 bài đều chỉ prune backbone.** HALP ghi thẳng: *"We only prune the backbone network in the
-detector."* Nếu ta prune cả neck/head thì **phải báo thêm một ablation chỉ-backbone** mới so được.
+**Bốn cảnh báo cho ô này:**
+
+1. **Chỉ HALP báo FLOPs.** Nếu trục x là FLOPs thì ô D co lại còn **đúng một điểm** cộng một đám điểm
+   chỉ có speedup. Trục speedup cũng không sạch: HALP và SMCP đo ở **BS=1**, MDP đo ở **BS=256**, và
+   HALP **không nói GPU nào** cho phần detection.
+2. **Con số 78.3 của SMCP không phải do SMCP công bố** — đó là MDP **đọc từ hình** của SMCP. Bài SMCP
+   gốc chỉ ghi "+2.63 mAP so với SSD300-RN50" và "×2.12, giảm 75% latency"; kết quả VOC của họ chỉ tồn
+   tại dưới dạng Fig. 3.
+3. **"Size ratio" của AdaSAP không phải tỉ lệ FLOPs** và không quy đổi được. Không đặt 0.40/0.20 lên
+   trục FLOPs.
+4. **Phạm vi cắt khác nhau và ảnh hưởng lớn:** HALP chỉ backbone, SMCP backbone + feature layers, MDP
+   cắt cả nguyên block. Việc MDP hơn dense +2.0 mAP nhiều khả năng phản ánh **ngân sách retrain cỡ 800
+   epoch** chứ không chỉ phản ánh pruning — nên Δ-so-với-dense ở ô này không phải hiệu ứng pruning sạch.
+
+**Cả nhóm đều chỉ prune backbone hoặc không nói rõ.** HALP ghi thẳng: *"We only prune the backbone
+network in the detector."* Nếu ta prune cả neck/head thì **phải báo thêm ablation chỉ-backbone**.
+
+Mốc tham chiếu khác trong cùng bảng HALP: SSD300-RN50 75.69 @16.23G; SSD300-VGG16 76.72 @31.44G;
+RetinaNet-RN50 77.27 @106.50G; SSD512-RN50-slim 75.83 @46.09G.
 
 ---
 
@@ -210,10 +272,10 @@ nhất là [RGP (iScience 2024)](https://doi.org/10.1016/j.isci.2024.111618) —
 | Ô | Số điểm | Chi phí GPU | Dùng khi |
 |---|---|---|---|
 | **A. YOLOv8/COCO** | 48 | Cao (COCO) | Muốn con số mạnh nhất, cần thầy chạy hộ |
-| **B. SSD300-VGG16/VOC** | ~9 | **Thấp** | Giữ SSD đang có, chạy được trên máy mình |
+| **B. SSD300-VGG16/VOC** | **15** (9 cùng trục) | **Thấp** | Giữ SSD đang có, chạy được trên máy mình |
 | **F. YOLOX-S/KITTI** | 4–6 | **Thấp nhất** | Muốn detector hiện đại mà vẫn 1 GPU |
-| C. RetinaNet/COCO | 7 | Cao | Nếu cần thêm detector thứ hai cho reviewer |
-| D. SSD512-R50/VOC | 5 | Trung bình | Chỉ khi chấp nhận trục speedup |
+| C. RetinaNet/COCO | 11 (2 nhóm baseline) | Cao | Nếu cần thêm detector thứ hai cho reviewer |
+| D. SSD512-R50/VOC | 7 nhưng **chỉ 1 điểm có FLOPs** | Trung bình | Chỉ khi chấp nhận trục speedup |
 
 **Phương án đề xuất: ô B làm chính (giữ SSD, chạy rẻ) + ô F làm phụ (detector hiện đại)**, và nếu thầy
 chạy hộ được thì thêm ô A để có con số đặt cạnh 48 điểm của PruningBench.
@@ -367,7 +429,7 @@ thiết kế riêng cho detector — đáng lấy nhất), [Neurocomputing 611](
 **Số cần kiểm chứng lại trước khi đưa vào luận văn:**
 - PruningBench: baseline 49.993 không ghi biến thể YOLOv8 lẫn loại mAP.
 - IEE (WACV'25): số SSD512 chỉ nằm trong hình.
-- SMCP: mAP ở ×2.12 chưa đọc được.
+- SMCP: mAP 78.3 là MDP đọc từ hình của SMCP, **không phải số SMCP công bố**.
 - LDT: intro ghi YOLOX-S "+1.6% mAP" nhưng Table 4 là 90.7 → 89.6; Fig. 3 nói iterative còn §4.2.2 nói
   "even one iteration".
 - Info-theoretic (arXiv 2408.16772): DOI TNNLS ghi trên arXiv **không resolve qua Crossref**.
