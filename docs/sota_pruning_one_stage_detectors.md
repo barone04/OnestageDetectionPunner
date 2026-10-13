@@ -248,3 +248,99 @@ LightPrune (ICCVW 2025).
 - Info-theoretic (arXiv 2408.16772): DOI TNNLS ghi trên arXiv **không resolve qua Crossref**.
 - R-TOSS: bài tự mâu thuẫn giữa "mAP IoU 0.5" và "AP@[.5:.95]".
 - Explainability-inspired (arXiv 2602.14040): baseline RetinaNet 0.151 mAP là phi lý — **không trích dẫn**.
+
+---
+
+## 8. Phụ lục: các bản YOLO mới nhất có được prune không? (khảo sát 13/10/2026)
+
+Câu hỏi: có phải trend hiện nay là prune trên các bản YOLO mới nhất (v12, v13, YOLO26)?
+**Trả lời: không.** Số liệu đếm được:
+
+| Bản | Ngày ra | Số bài pruning | Bài đầu tiên cách bản release |
+|---|---|---|---|
+| [YOLOv9](https://arxiv.org/abs/2402.13616) | 02/2024 | **0** | 32 tháng, vẫn chưa có |
+| [YOLOv10](https://arxiv.org/abs/2405.14458) | 05/2024 | **1** | ~22 tháng |
+| [YOLO11](https://docs.ultralytics.com/models/yolo11/) | 09/2024 | **~16** | 3 tháng (yếu) / 7–11 tháng (bài tử tế) |
+| [YOLOv12](https://arxiv.org/abs/2502.12524) | 02/2025 | **3** | ~9 tháng |
+| [YOLOv13](https://arxiv.org/abs/2506.17733) | 06/2025 | **1** | ~2 tháng |
+| [YOLO26](https://docs.ultralytics.com/models/yolo26/) | 01/2026 | **1** | ~4 tháng |
+| [YOLO27](https://docs.ultralytics.com/models/yolo27/) | công bố 09/2026, **chưa phát hành weights** | 0 | – |
+
+**"YOLOv25" không tồn tại.** Tìm arXiv toàn trường cho `"YOLOv25" OR "YOLO25"` ra 0 kết quả.
+Nhầm lẫn đến từ tên sự kiện: **YV25 = YOLO Vision 2025**, hội nghị nơi YOLO26 được giới thiệu.
+
+**Khoảng 70–80% bài pruning YOLO của 2025–2026 vẫn dùng v5/v7/v8.** Giữa 2026 vẫn có bài chọn
+YOLOv8n làm nền (vd [arXiv 2605.20669](https://arxiv.org/abs/2605.20669)). v12 + v13 + YOLO26 cộng
+lại đúng **5 bài trên toàn thế giới**.
+
+**Độ trễ không tỉ lệ với độ mới mà tỉ lệ với mức tiện dụng trong hệ sinh thái Ultralytics.** YOLOv9
+và YOLOv10 nằm ngoài codebase Ultralytics → gần như bị bỏ qua. YOLOv13 là fork của Ultralytics → bị
+prune chỉ sau 2 tháng.
+
+### Không bản nào từ v9 trở lên có kết quả pruning trên COCO
+
+Cả 22 bài đều chỉ đánh giá trên dataset nhỏ, thường là riêng tư: mía, lúa, bông, cúc vạn thọ,
+sứ cách điện, đường sắt, cọ dầu, chóp giao thông, cà chua nhà kính, ngô, KITTI/BDD100K, VisDrone,
+ExDark. Vài bài còn train from scratch, không dùng weight COCO.
+
+Bài pruning detector duy nhất 2025–2026 có số COCO là
+[arXiv 2602.14040](https://arxiv.org/abs/2602.14040), và nó dùng **YOLOv8**.
+
+### Vài kết quả cụ thể (đã đọc được số)
+
+- **ZZ-YOLOv11** (Sensors 2025, [PMC12158266](https://pmc.ncbi.nlm.nih.gov/articles/PMC12158266/)):
+  YOLOv11s trên KITTI+BDD100K, LAMP + distillation. 55.7 → 56.7 mAP50; params 9.41M → 2.45M;
+  21.3 → 14.1 GFLOPs. Abstract ghi −34% params nhưng bảng cho thấy −74%.
+- **SCD-YOLOv11n** (Sensors 2026, [PMC12787720](https://pmc.ncbi.nlm.nih.gov/articles/PMC12787720/)):
+  DepGraph one-shot, speed-up 2.0; mAP50 0.9623 → 0.9636, params 2.58M → 0.83M, 6.3 → 2.1 GFLOPs.
+- **MRS-YOLO** ([arXiv 2510.10553](https://arxiv.org/abs/2510.10553)): YOLO11n + LAMP rate 0.5;
+  94.1/84.1 → 94.8/86.4 (mAP50/mAP50-95). Đáng chú ý: bài này dùng **YOLO12n và YOLO13n làm baseline
+  so sánh, không phải làm đối tượng prune**.
+- **YOLO26-RipeLoc Lite** ([arXiv 2605.27129](https://arxiv.org/abs/2605.27129)): bài YOLO26 duy nhất.
+  BN structured pruning 30%: mAP50 0.9040 → 0.9039, **nhưng mAP50-95 0.6460 → 0.6260** — phần chữ chỉ
+  nói về mAP50 và không nhắc mức tụt 2 điểm này. Bài cũng **không xử lý gì cho head NMS-free của
+  YOLO26**, phần mô tả head còn nhắc DFL và NMS.
+- **YOLO-SAT** ([arXiv 2511.03888](https://arxiv.org/abs/2511.03888), YOLOv12n): thực ra **không phải
+  pruning** — chỉ đổi width multiplier trong YAML từ 0.50 xuống 0.33 rồi train lại. Giảm 15% params,
+  trong khi channel pruning thật đạt 70–90%.
+
+### Rào cản kỹ thuật (đã kiểm chứng tại nguồn gốc)
+
+1. **Torch-Pruning (DepGraph) dừng ở YOLOv8.** Thư mục `examples/` chỉ có yolov5, yolov7, yolov8 —
+   không có yolo11/v12/v13/26. README của chính ví dụ yolov8 ghi *"This example is crashed due to
+   ultralytics upgrade"* và phải ghim commit cũ.
+2. **Lỗi YOLO11 chưa ai sửa:** Torch-Pruning issue #454 "YOLO11 got stuck during pruning while
+   generating pruner", mở 02/2025, **vẫn đang open**. Phải tự viết lại phẫu thuật `C2f → C2f_v2` cho
+   block **C3k2** và **C2PSA**.
+3. **Ultralytics từ chối hỗ trợ structured pruning.** PR #21977 mở 07/09/2025, **đóng không merge**
+   ngày 14/02/2026, dù PR đã có kết quả chạy được. Tài liệu pruning duy nhất của họ là bài YOLOv5
+   *unstructured*.
+4. **Attention block không có BN γ để xếp hạng** — area attention/R-ELAN của YOLOv12, C2PSA của
+   YOLO11. Đó là lý do mọi bài v12 đều phải dùng LAMP (theo magnitude) hoặc chỉ rescale YAML.
+5. **Head NMS-free / bỏ DFL** của YOLOv10 và YOLO26 làm đổi ngữ nghĩa kênh ở head và tạo nhánh dual
+   head có thể phá tracing của DepGraph. **Chưa có công trình nào xử lý coupling này.**
+6. **AGPL-3.0 toàn bộ** (YOLO11, YOLOv12, YOLOv13, YOLO26 — xác nhận qua GitHub API).
+7. **Mục tiêu di động:** YOLO27 công bố 09/2026 nhưng cố ý không phát hành weights; "YOLOv14" lên
+   arXiv 05/08/2026 rồi **bị rút ngày 20/08/2026**.
+8. **Chất lượng báo cáo của nhóm bài này kém:** thiếu dòng trước/sau prune, thiếu tỉ lệ prune, thiếu
+   GFLOPs, đa số bỏ mAP50-95, nhiều chỗ abstract mâu thuẫn với bảng, và có một bài mà model "đã prune"
+   lại **lớn hơn** baseline (I-YOLOv11n, Sensors 25(15):4857 — không nên trích dẫn).
+9. **Độc canh phương pháp:** công thức gần như duy nhất là **LAMP + distillation qua Torch-Pruning**
+   (7/9 bài YOLO11 đọc được số). **Chưa ai làm bi-level hay learned-mask trên bất kỳ YOLO nào từ v11
+   trở lên.**
+
+### Kết luận cho lựa chọn model
+
+**Chọn YOLO11n/s làm model chính**, không chọn bản mới nhất:
+- Là bản thế hệ mới duy nhất có literature đủ dày để so sánh (~16 bài).
+- Có baseline COCO chính thức từ Ultralytics (mAP50-95 n = 39.5, s = 47.0).
+- Có sẵn prior art LAMP / DepGraph / Group-SLIM để đặt bi-level cạnh.
+
+**Giữ YOLOv8 làm đường ray kiểm chứng** — nơi duy nhất có ví dụ DepGraph chạy được và có bài pruning
+báo cáo COCO. **Dùng YOLOv12 hoặc YOLO26 cho một mục "tổng quát hoá sang kiến trúc mới nhất"**, không
+dùng làm nền thí nghiệm chính.
+
+Hai đóng góp còn trống và có giá trị cao nhất từ khảo sát này:
+1. **Báo cáo mAP50-95 trên COCO cho model đã prune, với bất kỳ YOLO nào từ v9 trở lên** — chưa ai làm.
+2. **Giải bài toán dependency-graph xuyên qua attention block (C2PSA / area attention) và head
+   NMS-free dual** — đây chính là lý do kỹ thuật khiến cả ngành mắc kẹt ở v8.
