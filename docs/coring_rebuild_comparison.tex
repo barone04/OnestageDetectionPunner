@@ -1,0 +1,115 @@
+% =====================================================================
+%  So sánh: CORING gốc vs Rebuild YOLO vs Rebuild ResNet-56
+%  Dự án: Component-aware Bi-level Pruning for One-stage Detectors
+%
+%  *** BIÊN DỊCH BẰNG XeLaTeX HOẶC LuaLaTeX *** (KHÔNG dùng pdfLaTeX).
+%    Overleaf: Menu -> Compiler -> XeLaTeX.
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}     % font Unicode có đủ dấu tiếng Việt
+
+\usepackage[margin=2cm]{geometry}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+
+\setlist{leftmargin=1.4em,topsep=2pt,itemsep=1pt}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{\textbf{So sánh CORING: bản gốc vs 2 bản rebuild}\\
+\large Bản gốc \textperiodcentered{} Rebuild YOLO (so bi-level) \textperiodcentered{} Rebuild ResNet-56 (validate)}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+% ---------------------------------------------------------------------
+\section{Ba bản, ba mục đích}
+\begin{itemize}
+  \item \textbf{CORING gốc} (\href{https://github.com/pvti/CORING}{pvti/CORING}): phương pháp gốc
+        --- \code{main.py} (one-shot) và \code{main\_kshot.py} (k-shot).
+  \item \textbf{Rebuild YOLO} (\code{pruning/coring.py} + \code{prune.py} \code{-{}-method coring}):
+        cắm CORING vào harness YOLO để \emph{so công bằng với bi-level} trên DeepFish.
+  \item \textbf{Rebuild ResNet-56} (\code{prune\_resnet56\_cifar10.py}): chạy lại CORING trên chính
+        benchmark gốc (ResNet-56/CIFAR-10) để \emph{kiểm chứng} thuật toán đúng (paper Table 3:
+        94.76\% @ 22.4\% params).
+\end{itemize}
+
+% ---------------------------------------------------------------------
+\section{Bảng so sánh}
+\footnotesize
+\renewcommand{\arraystretch}{1.3}
+\noindent\makebox[\textwidth][c]{%   % bảng tràn ra 2 lề, không cần package
+\begin{tabularx}{1.2\textwidth}{|p{2cm}|Y|Y|Y|p{2.5cm}|}
+\hline
+\textbf{Chiều} & \textbf{CORING gốc} & \textbf{Rebuild YOLO} & \textbf{Rebuild ResNet-56} & \textbf{Giống gốc?}\\
+\hline
+Mục đích & phương pháp gốc & so với bi-level (YOLO/DeepFish) & validate reproduce số paper (CIFAR-10) & Khác (chủ đích)\\
+\hline
+Thuật toán chọn & \code{get\_rank} (HOSVD $+$ VBD $+$ min\_sum, loop) & \code{get\_rank} (HOSVD $+$ VBD $+$ min\_sum, loop) & \code{get\_rank} (HOSVD $+$ VBD $+$ min\_sum, loop) & \textbf{Giống} (cả 2)\\
+\hline
+Get-prunable / surgery & \code{load\_*\_model} per-arch (copy top-K conv$+$fc) & \textbf{PrunableConv$+$mask$+$\code{convert\_to\_lean}} (harness mình) & \code{load\_resnet56\_pruned} (port từ gốc) & R56 giống \textperiodcentered{} YOLO khác\\
+\hline
+Copy BN sliced & \textbf{KHÔNG} (BN được init weight) & CÓ (copy như Conv $+$ Act) & CÓ (copy như Conv $+$ Act) & \textbf{Khác} (cả 2 thêm BN)\\
+\hline
+Schedule & \textbf{back-loaded} $r/(K{-}\text{shot})$ (\code{main\_kshot.py}) & \textbf{back-loaded} $r/(K{-}it)$ (\code{prune.py:155}) & \textbf{back-loaded} $r/(K{-}\text{shot})$ (\code{:278}) & \textbf{Giống} (cả 2)\\
+\hline
+Phân bổ per-layer & \textbf{LIST per-layer} (vd \code{[0.]+[0.18]*29}) & \textbf{UNIFORM} (1 scalar mọi layer) & \textbf{LIST per-layer} (như gốc) & R56 giống \textperiodcentered{} YOLO khác\\
+\hline
+Re-rank mỗi shot & có & có & có & \textbf{Giống} (cả 2)\\
+\hline
+Finetune & MultiStepLR 300ep $+$ calib$/K$ & cosine warm-restart, \code{finetune\_epochs}$/$shot & MultiStepLR (khớp gốc) $+$ calib$/K$ & R56 giống \textperiodcentered{} YOLO khác\\
+\hline
+Model / data & ResNet/VGG\ldots{} \textperiodcentered{} CIFAR/ImageNet & YOLOv1 \textperiodcentered{} DeepFish & ResNet-56 \textperiodcentered{} CIFAR-10 & Khác (bài toán)\\
+\hline
+\end{tabularx}}
+\normalsize
+
+% ---------------------------------------------------------------------
+\section{Nhận xét ngắn (giống/khác gốc \& ảnh hưởng)}
+
+\paragraph{Rebuild ResNet-56 --- faithful nhất.}
+Giống gốc gần như hoàn toàn: thuật toán chép trung thành, surgery port, schedule back-loaded per-layer,
+hyperparams y hệt (300ep / wd 0.005 / bs 256 / decay 150,225). Khác duy nhất: \textbf{thêm copy BN}
+(có cờ \code{-{}-no-bn-copy} để khớp gốc tuyệt đối). $\Rightarrow$ ảnh hưởng pp gốc $\approx 0$; đúng
+vai \emph{kiểm chứng thuật toán} (ra $\sim$94.76\% @ 22.4\% là pass).
+
+\paragraph{Rebuild YOLO --- giữ thuật toán gốc, đổi harness $+$ phân bổ (cố ý để fair).}
+\begin{itemize}
+  \item Giống gốc: thuật toán chọn (chép trung thành), schedule \textbf{back-loaded}, re-rank mỗi shot,
+        surgery-first.
+  \item Khác gốc (chủ đích): surgery $=$ \code{convert\_to\_lean} (harness mình, có copy BN); phân bổ
+        \textbf{uniform} thay per-layer list; finetune cosine.
+\end{itemize}
+$\Rightarrow$ \textbf{không đụng thuật toán chọn filter}; chỉ đổi phần cắt/chỉnh để đưa vào sân YOLO.
+
+\paragraph{Thuật toán CORING (quan trọng).}
+\code{pruning/coring.py} hiện là bản \textbf{chép trung thành loop-based} (KHÔNG vectorized, KHÔNG
+chuẩn hoá dấu SVD: \code{get\_u\_svd} trả \code{u[:,:rank]} thẳng như gốc). $\Rightarrow$ kết quả
+\textbf{trùng khớp CORING gốc}; đánh đổi là chậm hơn. Cả 2 bản rebuild đều gọi bản này.
+
+% ---------------------------------------------------------------------
+\section{Lưu ý cho bảng so chính (YOLO)}
+\begin{itemize}
+  \item Rebuild YOLO: \code{coring} dùng \textbf{back-loaded}, còn \code{bilevel} dùng \textbf{linear}
+        ($r\cdot(it{+}1)/K$, \code{prune.py:187}) $\rightarrow$ \textbf{khác lịch}. Hiện là so
+        ``method as-published'', \emph{chưa cô lập importance}. Muốn claim ``thuật toán chọn của tôi
+        hơn'' $\rightarrow$ cho cả hai \textbf{cùng lịch} (cùng linear hoặc cùng back-loaded).
+  \item Phân bổ \textbf{uniform} (rebuild YOLO) khác \textbf{per-layer list} (gốc/ResNet-56) --- hợp lý
+        vì bi-level cũng uniform, nhưng khác cách gốc phân bổ sparsity.
+  \item Fair nhất: chạy 2 biến thể CORING --- (a) cùng lịch với bi-level (cô lập importance),
+        (b) back-loaded native (đúng paper) --- và báo cáo cả hai.
+\end{itemize}
+
+\paragraph{Tóm.} Thuật toán CORING \textbf{giống hệt gốc} ở cả 2 rebuild. ResNet-56 bám gốc mọi mặt
+(validate). YOLO giữ thuật toán $+$ schedule back-loaded, chỉ đổi harness / phân bổ / finetune để so
+với bi-level --- không làm sai lệch phương pháp gốc.
+
+\end{document}
