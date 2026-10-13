@@ -1,0 +1,192 @@
+% =====================================================================
+%  Phân tích Torch-Pruning (DepGraph) để so sánh với Bi-level Pruning
+%  Dự án: Component-aware Bi-level Pruning for One-stage Detectors
+%
+%  *** BIÊN DỊCH BẰNG XeLaTeX HOẶC LuaLaTeX *** (KHÔNG dùng pdfLaTeX).
+%    Overleaf: Menu -> Compiler -> XeLaTeX.
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}     % font Unicode có đủ dấu tiếng Việt
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+
+\setlist{leftmargin=1.4em,topsep=2pt,itemsep=1pt}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\src}[1]{{\small\ttfamily(#1)}}   % trích file:dòng
+
+\title{\textbf{Phân tích Torch-Pruning (DepGraph)}\\
+\large Đối chiếu với phương pháp \emph{Bi-level Pruning} --- chuẩn bị thực nghiệm so sánh}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+
+\noindent\textbf{Nguồn:} repo \href{https://github.com/VainF/Torch-Pruning}{VainF/Torch-Pruning}
+(đọc code thật, module \code{torch\_pruning/pruner} và \code{torch\_pruning/dependency}); paper
+\emph{DepGraph: Towards Any Structural Pruning}, CVPR 2023, arXiv:2301.12900. Mọi trích dẫn ghi
+\src{file:dòng}.
+
+% =====================================================================
+\section{Câu hỏi 1 --- Cách ``get prunable conv'': có giống bài mình không?}
+
+\noindent\textbf{Trả lời ngắn: KHÔNG giống, khác về bản chất.} Bài mình dùng \emph{wrapper +
+mask thủ công}; Torch-Pruning (TP) dùng \emph{đồ thị phụ thuộc tự động, không wrapper, không mask}.
+
+\subsection{Bài mình làm thế nào (để so)}
+\code{PrunableConv} bọc \code{Conv+BN+Act} và mang \code{u\_mask}/\code{s\_mask}, mask được nhân vào
+weight ngay trong \code{forward}. Muốn prune phải \emph{tự luồn index} theo chuỗi phụ thuộc
+\emph{hardcode cho từng kiến trúc} (ResNet ``mid-only'' để né residual, VGG chuỗi tuyến tính, head cố
+định). Tức là \textbf{con người khai báo trước} đâu là prunable và cắt cái gì kéo theo cái gì.
+
+\subsection{Torch-Pruning làm thế nào}
+TP \textbf{không sửa/bọc module}, \textbf{không thêm mask}. Nó tự phát hiện và gom nhóm bằng
+\code{DependencyGraph}. Cụ thể:
+
+\paragraph{(a) Trace đồ thị bằng autograd \code{grad\_fn} (không phải torch.fx).}
+\code{build\_dependency(model, example\_inputs)} chạy một lượt forward, đăng ký \code{forward\_hook}
+cho mọi module để lập bản đồ \code{grad\_fn}$\rightarrow$module
+(\code{gradfn2module[out.grad\_fn]=module}, \src{dependency/graph.py:439--461, dòng 454}). Sau đó
+\code{\_trace\_computational\_graph()} \emph{đi ngược đồ thị backward} từ output
+\src{graph.py:513+}, nhận diện các op nối/tách kênh: \code{catbackward / split / unbind / view /
+slice / elementwise} \src{graph.py:536--559} để dựng quan hệ phụ thuộc \emph{theo trục kênh}.
+
+\paragraph{(b) Tự chọn conv gốc để prune.}
+Quét \code{module2node}, giữ module thuộc \code{root\_module\_types} (mặc định \code{[Conv, Linear,
+LSTM]}) và có pruner tương ứng trong \code{REGISTERED\_PRUNERS} (\code{get\_all\_groups}
+\src{graph.py:276--326}; \code{get\_pruner\_of\_module} \src{graph.py:328--333}, tra \code{PrunerBox}
+theo type). \textbf{Người dùng không cần đánh dấu conv nào} --- TP tự nhận theo kiểu module.
+
+\paragraph{(c) \code{Group} --- đơn vị prune, xử lý residual/concat/shared TỰ ĐỘNG.}
+\code{Group} là danh sách \code{[(Dep, idxs), \ldots]} gồm các layer \emph{phải cắt đồng bộ cùng một
+tập index} \src{dependency/group.py:7--27}. \code{Group.prune()} gọi \code{dep(idxs)} cho từng thành
+viên \src{group.py:32--64}. Đây chính là \textbf{grouped pruning}: cắt filter của \code{conv1} thì
+group tự kéo theo BN, \code{in\_channels} của conv kế, và \emph{nhánh residual/concat cùng trục kênh}.
+
+\paragraph{(d) Cắt trực tiếp, không mask.}
+Mọi thao tác là \code{torch.index\_select} trên weight/grad thật
+(\code{\_prune\_parameter\_and\_grad}, \src{function.py:144--148}). Không tồn tại zero-mask.
+
+\subsection{Kết luận câu 1}
+\begin{center}
+\begin{tabular}{@{}p{6.2cm}p{6.2cm}@{}}
+\hline
+\textbf{Bài mình} & \textbf{Torch-Pruning}\\
+\hline
+Wrapper \code{PrunableConv} + \code{u\_mask/s\_mask} & Không wrapper, không mask\\
+Chuỗi phụ thuộc \emph{hardcode per-arch} & Đồ thị phụ thuộc \emph{tự trace} (\code{grad\_fn})\\
+Né residual bằng ``mid-only'' & Prune \emph{cả residual stream} qua \code{Group}\\
+Con người khai báo prunable & Tự phát hiện theo type\\
+\hline
+\end{tabular}
+\end{center}
+\noindent Điểm mạnh (proposal) của TP = \textbf{gom được nhiều conv phụ thuộc thành 1 group} và cắt
+đồng bộ tự động --- đúng thứ ta muốn giữ.
+
+% =====================================================================
+\section{Câu hỏi 2 --- Logic / thuật toán prune}
+
+\noindent\textbf{TP là structured (cắt kênh) thuần, một tầng.} \emph{Không có} bước ``unstructured
+zero theo \(s\cdot\mathrm{std}(W)\)'' đứng trước như Level-1 Song Han của mình --- \textbf{đây đúng là
+khoảng trống bài mình khai thác}.
+
+\subsection{Các tiêu chí độ quan trọng có sẵn} \src{pruner/importance.py}
+Mỗi tiêu chí trả score 1-D per-channel, gom qua group bằng \code{\_reduce} (sum/mean/max/prod\ldots
+\src{dòng 139--178}) rồi \code{\_normalize} \src{dòng 115--137}:
+\begin{itemize}
+  \item \textbf{MagnitudeImportance} \src{importance.py:58, 203}: \(\lVert W_c\rVert_p\), mặc định
+        \(p{=}2\); \code{w.abs().pow(p).sum(1)}. (Giữ filter norm lớn --- cùng ý ``giữ filter mạnh''.)
+  \item \textbf{BNScaleImportance} \src{importance.py:272}: Network Slimming, dùng \(|\gamma|\) của BN.
+  \item \textbf{FPGMImportance} \src{importance.py:320, 352--354}: Geometric Median, tính
+        \emph{ma trận khoảng cách giữa các filter} \code{torch.cdist} rồi tổng. \textbf{Gần triết lý
+        ``cắt cặp filter giống nhau'' của mình nhất}, nhưng dùng L2 chứ không phải mixed-norm
+        L1-\(\infty\)-\(\infty\).
+  \item \textbf{LAMPImportance} \src{importance.py:296}: magnitude chuẩn hoá LAMP.
+  \item \textbf{GroupTaylorImportance} \src{importance.py:411, 470}: \(|w\cdot dw|\) (cần backward).
+  \item \textbf{GroupHessianImportance} \src{importance.py:662, 747}: OBD, \(w^2\cdot h\).
+  \item \textbf{OBDCImportance} \src{importance.py:544}, \textbf{Activation}, \textbf{Random}.
+\end{itemize}
+
+\subsection{One-shot / iterative \& regularizer}
+\begin{itemize}
+  \item \textbf{Cả one-shot lẫn iterative}: \code{iterative\_steps} + \code{linear\_scheduler}
+        (ratio bước \(i\) = \(i/\text{steps}\cdot\text{target}\), \src{scheduler.py:3--4}) --- tăng dần
+        \emph{y hệt} vòng \(\text{sparsity}=\text{target}\cdot(i{+}1)/\text{iters}\) của mình.
+  \item \textbf{Sparse-training regularizer} (có, nhưng khác Song Han): \code{BNScalePruner} (L1 lên
+        \(\gamma\), \src{batchnorm\_scale\_pruner.py:125--147}), \code{GroupNormPruner} (group-lasso
+        của paper DepGraph, \src{group\_norm\_pruner.py:124--192}), \code{GrowingRegPruner}
+        \src{growing\_reg\_pruner.py:122--183}. Vai trò ``làm kênh yếu teo trước khi cắt'' --- gần
+        Level-1 về \emph{mục đích}, nhưng là \emph{penalty group-norm trên grad}, KHÔNG phải zero-hoá
+        unstructured theo std.
+\end{itemize}
+
+\subsection{Kết luận câu 2}
+Chỗ khác biệt học thuật (biến độc lập cần so) nằm ở \emph{tiêu chí chọn kênh}:
+bài mình = \textbf{bi-level (unstructured Song Han \(\rightarrow\) structured mixed-norm
+L1-\(\infty\)-\(\infty\), cắt cặp filter giống nhau)}; TP = các importance một tầng, gần nhất là
+\textbf{FPGM} và \textbf{Magnitude}. TP \emph{không} có tầng unstructured phía trước.
+
+% =====================================================================
+\section{Câu hỏi 3 --- Pipeline: get prunable \(\rightarrow\) prune \(\rightarrow\) surgery
+\(\rightarrow\) lean \(\rightarrow\) finetune?}
+
+\noindent\textbf{Có, đúng chuỗi đó, và MỤC TIÊU CUỐI GIỐNG mình} (model dense nhỏ, deploy được,
+\emph{giữ nguyên topology}). Chỉ khác cách \emph{materialize}.
+
+\begin{enumerate}
+  \item \textbf{Get prunable}: \code{DependencyGraph} trace \(\rightarrow\) groups (Câu 1).
+  \item \textbf{Prune}: chọn kênh theo importance (Câu 2), một hoặc nhiều bước.
+  \item \textbf{Surgery / materialize}: model biến thành \textbf{DENSE NHỎ THẬT}, không phải mask.
+        \code{ConvPruner.prune\_out\_channels} giảm \code{layer.out\_channels} và thay
+        \code{layer.weight} bằng tensor đã \code{index\_select} \src{function.py:153--164};
+        \code{prune\_in\_channels} giảm \code{in\_channels} tương ứng \src{function.py:166--178};
+        BN/Linear tương tự. Shape/Params/FLOPs giảm thật $=$ đúng vai trò
+        \code{convert\_to\_lean} của mình.
+  \item \textbf{Lean model}: cắt \emph{in-place trên chính model} (TP) --- khác mình
+        \emph{rebuild từ config} (\code{build\_lean\_from\_config}). Kết quả tương đương.
+        Index tường minh (\code{keep\_idxs}=range\(-\)idxs, \src{function.py:154}),
+        \textbf{không có nhánh fallback \code{[:N]}} như bug PrunedFishNet cũ.
+  \item \textbf{Finetune}: \textbf{do người dùng tự lo}, TP chỉ cắt. Ví dụ yolov8 tự gọi
+        \code{train\_v2} sau mỗi bước prune \src{examples/yolov8/yolov8\_pruning.py:358--360}, lặp
+        \code{for i in range(iterative\_steps)} \src{dòng 313}: prune \(\rightarrow\) finetune
+        \(\rightarrow\) prune \(\ldots\)
+\end{enumerate}
+
+% =====================================================================
+\section{Đối chiếu chuẩn fair \& kết luận}
+
+\begin{center}
+\begin{tabular}{@{}p{5.2cm}p{7.2cm}@{}}
+\hline
+\textbf{Tiêu chí} & \textbf{Torch-Pruning}\\
+\hline
+Đổi topology? & \textbf{KHÔNG} --- same topology, fewer channels\\
+Cùng họ với bi-level? & \textbf{Có} (channel-pruning giữ topology)\\
+Xếp bảng nào? & \textbf{Bảng chính apples-to-apples} (khác NORTON, không tách riêng)\\
+Biến độc lập (cần so) & \code{importance.py} $+$ có/không tầng unstructured\\
+Cơ chế cắt (không cần sao chép) & \code{function.py} (\code{index\_select}) $+$ \code{dependency/} (grouping)\\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent\textbf{Kết luận.} TP là \emph{đối thủ trực tiếp, so được ngay trong bảng chính}. Cả hai
+``same topology, fewer channels'' --- chỉ khác \textbf{tiêu chí chọn kênh} và \textbf{tầng
+unstructured}. Điểm mạnh của TP (DepGraph gom nhiều conv $+$ prune residual $+$ \code{index\_select})
+là \emph{hạ tầng chung} nên giữ lại và dùng chung cho mọi phương pháp; đóng góp của mình được cắm vào
+đó dưới dạng một \code{Importance} tuỳ biến (chi tiết ở tài liệu pipeline riêng).
+
+\paragraph{Lưu ý fair.} TP prune được cả residual stream (scope rộng hơn ``mid-only'' của mình).
+Khi so, hoặc (a) ép cùng scope để cô lập đúng biến ``importance'', hoặc (b) để mỗi bên dùng scope tự
+nhiên, so ở \emph{iso-\%FLOPs} $+$ \emph{iso-finetune} và ghi rõ khác biệt scope.
+
+\paragraph{Điểm chưa chắc.} Chỉ đọc \code{torch\_pruning/pruner} $+$ \code{dependency}; trong phạm vi
+đó \textbf{không có} API unstructured-zero-theo-std. Nếu cần khẳng định tuyệt đối, grep thêm toàn repo.
+
+\end{document}

@@ -1,0 +1,111 @@
+% =====================================================================
+%  Quy chuẩn so sánh CÔNG BẰNG giữa các thuật toán pruning
+%  Dự án: Component-aware Bi-level Pruning for One-stage Detectors
+%
+%  *** BIÊN DỊCH BẰNG XeLaTeX HOẶC LuaLaTeX *** (KHÔNG dùng pdfLaTeX).
+%    Trên Overleaf: menu Menu -> Compiler -> XeLaTeX.
+%    Nếu bắt buộc pdfLaTeX: thay khối fontspec bằng
+%      \usepackage[utf8]{inputenc}\usepackage[T5]{fontenc}\usepackage[vietnamese]{babel}
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}   % font Unicode có đủ dấu tiếng Việt (mặc định Overleaf)
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+
+\setlist{leftmargin=1.4em,topsep=2pt,itemsep=1pt}
+
+\title{\textbf{Quy chuẩn thực nghiệm so sánh công bằng các thuật toán pruning}\\
+\large \emph{Component-aware Bi-level Pruning for One-stage Detectors}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+% ---------------------------------------------------------------------
+\section{Nguyên tắc}
+Pruning là \textbf{thuật toán model-agnostic} --- chỉ chấm điểm và cắt các lớp conv, không gắn với một
+detector cụ thể. Vì vậy \textbf{không cần} tìm paper prune riêng cho YOLOv1/SSD/RetinaNet; ta lấy
+\emph{thuật toán} của baseline (từ \emph{code gốc}) và áp lên \textbf{cùng một model của mình}.
+
+\begin{quote}
+So sánh công bằng $=$ một thí nghiệm có kiểm soát: \textbf{chỉ đổi thuật toán pruning}, giữ nguyên
+mọi thứ khác. Việc \emph{dùng chung một model} chính là thứ tạo ra sự công bằng.
+\end{quote}
+
+% ---------------------------------------------------------------------
+\section{Biến độc lập và biến kiểm soát}
+Hai nhóm dưới đây \emph{độc lập}, không tương ứng theo cặp.
+
+\paragraph{Được phép khác (mỗi phương pháp một kiểu).}
+\begin{itemize}
+  \item Thuật toán tính độ quan trọng (magnitude, BN-$\gamma$, HOSVD, Taylor\ldots).
+  \item Cách chọn lớp prunable \& phân bổ sparsity (nếu đó là đóng góp của phương pháp).
+  \item Hyperparameter riêng của phương pháp ($\lambda$, rank, threshold\ldots).
+\end{itemize}
+
+\paragraph{Bắt buộc giống nhau (giữ cố định).}
+\begin{itemize}
+  \item Model detection, backbone, input size, pretrained.
+  \item Training paradigm: loss, augment, optimizer, lr, batch, số epoch train dense.
+  \item Budget finetune sau cắt.
+  \item \textbf{Mức nén}: đánh giá tại cùng \%Params / \%FLOPs (iso-compression).
+\end{itemize}
+
+% ---------------------------------------------------------------------
+\section{Quy tắc triển khai}
+\begin{enumerate}
+  \item \textbf{Chỉ lấy phần lõi của baseline}: thuật toán độ quan trọng, cách chọn lớp/sparsity,
+        protocol finetune. \emph{Không} sao chép ``cơ chế cắt''.
+  \item \textbf{Cơ chế cắt dùng chung được}: surgery/export-lean và in-place \texttt{index\_select}
+        chỉ là hai cách vật chất hoá cùng một kết quả --- cắt cùng tập kênh thì model lean y hệt.
+        Do đó dùng chung một surgery của mình cho mọi baseline, chỉ thay phần \emph{chọn kênh}.
+  \item \textbf{Iso-compression}: cho mọi phương pháp đạt \emph{cùng} mốc nén (vd $30/50/70\%$ FLOPs),
+        rồi so mAP tại từng mốc (đường cong accuracy--vs--compression).
+  \item \textbf{Tách hyperparameter}: cái \emph{chung} (lr, optimizer, augment) giữ giống hệt;
+        cái \emph{riêng} của mỗi phương pháp tune với \emph{công sức ngang nhau}.
+  \item \textbf{Chuẩn hoá finetune}: cùng budget cho mọi phương pháp (kể cả phương pháp đề xuất);
+        đừng để finetune thành lợi thế ẩn.
+  \item \textbf{Kiểm chứng setup}: chạy code gốc trên benchmark gốc của baseline, tái hiện đúng số
+        trong paper trước khi áp lên bài toán của mình.
+  \item \textbf{Minh bạch}: ghi repo $+$ commit $+$ toàn bộ hyperparameter; thêm một benchmark chuẩn
+        (PASCAL VOC) bên cạnh dataset domain (DeepFish/Etroplus) để đối chiếu literature.
+\end{enumerate}
+
+% ---------------------------------------------------------------------
+\section{Ngoại lệ: NORTON (phương pháp phân rã)}
+NORTON \textbf{không phải channel-pruning thuần}. Nó dùng \textbf{CP decomposition}: xấp xỉ tensor
+weight của một conv bằng tổng $R$ thành phần rank-1
+$\;\mathcal{W}\approx\sum_{r=1}^{R} a_r\otimes b_r\otimes c_r\otimes d_r\;$
+rồi thay lớp conv gốc bằng \emph{một chuỗi conv nhỏ} (khối \texttt{CPDBlock}). Tức là nó \emph{không loại
+kênh} mà \emph{giảm rank} $\rightarrow$ \textbf{đổi topology}. Đây là \emph{họ khác}
+(decomposition-based), nên phải so riêng, cẩn thận:
+
+\begin{itemize}
+  \item \textbf{Không so theo số kênh}: chỉ so ở iso-\%Params và iso-\%FLOPs.
+  \item \textbf{Không dùng chung surgery}: phải dùng khối tái dựng riêng của NORTON (\texttt{CPDBlock}).
+  \item \textbf{FLOPs $\neq$ latency}: lớp phân rã (nhiều conv nhỏ/depthwise) thường memory-bound;
+        FLOPs giảm không kéo theo latency giảm $\rightarrow$ \textbf{phải đo latency/FPS thực tế}.
+  \item \textbf{Trình bày}: đặt NORTON ở \emph{bảng riêng} (đánh dấu ``decomposition-based''),
+        không nhồi vào bảng channel-pruning; ghi chú rõ nó đổi topology.
+\end{itemize}
+
+% ---------------------------------------------------------------------
+\section*{Checklist}
+\begin{itemize}
+  \item[$\square$] Cùng model / backbone / input / pretrained / training paradigm / budget finetune.
+  \item[$\square$] So ở cùng \%Params \emph{và} \%FLOPs.
+  \item[$\square$] Hyperparameter riêng tune công sức ngang nhau.
+  \item[$\square$] Code gốc $+$ tái hiện số gốc $+$ ghi repo/commit.
+  \item[$\square$] Thêm benchmark chuẩn (VOC) cạnh dataset domain.
+  \item[$\square$] \textbf{NORTON}: bảng riêng, iso-\%Params/\%FLOPs, \textbf{đo latency thực}.
+\end{itemize}
+
+\end{document}

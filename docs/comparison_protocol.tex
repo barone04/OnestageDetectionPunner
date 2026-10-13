@@ -1,0 +1,168 @@
+% =====================================================================
+%  Quy chuẩn so sánh công bằng các phương pháp pruning
+%  *** Biên dịch bằng XeLaTeX / LuaLaTeX *** (Overleaf: Compiler -> XeLaTeX)
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+
+\setlist{leftmargin=1.4em,topsep=1pt,itemsep=1pt}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{Quy chuẩn so sánh công bằng các phương pháp pruning}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2.5em}
+
+% =====================================================================
+\section{Đặt vấn đề}
+
+So các phương pháp pruning ở cùng target sparsity / compress rate là không công bằng: rate là núm vặn,
+không phải thành quả nén. Mỗi phương pháp áp ``rate = 0.5'' khác nhau (uniform / auto / decompose) và
+cắt ở vị trí khác nhau. Thành quả nén đo bằng FLOPs, Params, latency, không phải bằng ``sparsity''.
+
+FLOPs và Params không tuyến tính:
+\[
+  \text{Params} = C_{out}C_{in}k_h k_w, \qquad \text{FLOPs} = \text{Params}\times(H\times W).
+\]
+$H\times W$ khác nhau mỗi layer nên cùng rate cho ra Params/FLOPs khác nhau, và không khớp đồng thời cả
+hai được. Ví dụ: bi-level @rate 0.5 $\to$ 100M FLOPs, mAP 0.33; SVP @rate 0.5 $\to$ 130M FLOPs, mAP
+0.34. Ở cùng rate SVP ``thắng'', nhưng chỉ vì nén ít hơn; ở cùng 100M FLOPs bi-level mới thắng.
+
+% =====================================================================
+\section{Cách nén của từng phương pháp và yêu cầu trung thành gốc}
+
+Mỗi phương pháp gồm: núm ngân sách, phân bổ per-layer, tiêu chí chọn filter. Ba phần này phải trung
+thành bản gốc; chỉ cơ chế cắt/harness được dùng chung.
+
+\footnotesize
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\textwidth}{|p{2cm}|Y|Y|Y|p{2.4cm}|}
+\hline
+Method & Núm = \% của & Phân bổ per-layer & Chọn filter & Trung thành gốc\\
+\hline
+bi-level & filter/layer & uniform & Song Han $\to$ L1-$\infty$-$\infty$ & (pp của ta)\\
+\hline
+CORING & filter (tích luỹ) & uniform (gốc: list) & HOSVD $+$ VBD $+$ min\_sum & lịch khớp; đổi allocation về per-layer\\
+\hline
+NORTON & filter/layer $+$ rank & list per-layer & subspace-angle & rebuild thiếu bước prune\\
+\hline
+SLIMING & kênh toàn cục & auto (GAM theo SV) & GEM (max nuclear norm) & khớp gốc; thêm đo \%FLOPs\\
+\hline
+Torch-Pruning & \code{pruning\_ratio} & auto (DepGraph) & magnitude/FPGM/BN & dùng API thư viện\\
+\hline
+\end{tabularx}
+\normalsize
+
+\medskip
+Cần sửa trước khi so:
+\begin{itemize}
+  \item CORING: đổi phân bổ về per-layer list như \code{main\_kshot.py} gốc (hiện uniform).
+  \item NORTON: thêm stage 2 prune subspace-angle (port \code{pruning/saliency.py} $+$ \code{prune.py}); hiện chỉ CP-decompose.
+  \item SLIMING: giữ GAM (đã khớp); thêm đo \%FLOPs (đang theo \%kênh).
+  \item Mọi method: tái hiện số gốc trên benchmark gốc một lần để xác nhận cài đúng.
+\end{itemize}
+
+% =====================================================================
+\section{Các bài A* so sánh thế nào}
+
+Đọc code + bảng SLIMING/CORING/NORTON/Torch-Pruning: họ không so ở target sparsity mà so trên
+\%MACs/\%Params đo được. Bảng SLIMING (Table 3--7) mỗi dòng báo \code{Method | Top-1 | MACs (CR\%) |
+Params (CR\%)}; \code{CR} là compression ratio đo được. Cách so:
+\begin{itemize}
+  \item Nhóm thành tầng compression (vd $\sim$50\%, $\sim$70\% MACs), trong mỗi tầng so accuracy.
+  \item Pareto: thắng khi accuracy cao hơn ở compression tương đương hoặc tốt hơn. Ví dụ nguyên văn: ``ARPruning comparable param reduction (89 vs 92\%) but lags accuracy (92.69 vs 93.74)''.
+  \item Torch-Pruning cũng đo MACs/Params bằng \code{count\_ops\_and\_params} rồi so accuracy-vs-MACs.
+\end{itemize}
+Kết luận: trục so là \%MACs/\%Params đo được, theo Pareto, trình bày dạng bảng phân tầng hoặc đường
+cong. Target sparsity chỉ là núm nội bộ.
+
+% =====================================================================
+\section{Quy chuẩn của chúng ta}
+
+Mốc so:
+\begin{itemize}
+  \item Trục chính: \%MACs (FLOPs) giảm. Phụ: \%Params, latency/FPS.
+  \item NORTON bắt buộc đo latency (CP-decompose depthwise, FLOPs không phản ánh tốc độ).
+  \item Chỉ khớp một trục (MACs); trục kia report xấp xỉ (không tuyến tính nên không ép cả hai).
+\end{itemize}
+
+Mốc tương đối, tự scale theo model (không hardcode giá trị tuyệt đối):
+\[
+  R \in \{30,50,70\}\%\ \text{giảm MACs}, \qquad \text{target\_MACs} = (1-R)\times \text{MACs}_0.
+\]
+
+% =====================================================================
+\section{Run case}
+
+Đo \%Params/\%MACs không cần train (chỉ phụ thuộc cấu trúc đã cắt) --- tách khỏi bước finetune.
+
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\textwidth}{|p{1.7cm}|Y|}
+\hline
+Phase 0 & Đo dense một lần: $(\text{MACs}_0, \text{Params}_0)$. Cố định cho mọi method: dataset (train/val/test), input, finetune budget, scope.\\
+\hline
+Phase 1 & Sweep cấu trúc (không train): mỗi (method, rate) $\to$ \code{prune} $\to$ \code{measure} (params, flops). Rẻ, vài giây/điểm.\\
+\hline
+Phase 2 & Finetune (cùng budget) $\to$ \code{eval} mAP trên test $+$ \code{benchmark} latency $\to$ ghi CSV.\\
+\hline
+\end{tabularx}
+
+\medskip
+Cách rẻ nhất --- sweep $+$ nội suy: chạy grid rate cố định (4--5 mức) $\to$ đường cong mAP-vs-\%MACs
+$\to$ đọc mọi target bằng nội suy, không finetune lại. Số finetune $=$ số rate (vd 5 method $\times$ 5
+rate $=$ 25 run, vài phút/run). Binary-search chỉ khi cần đúng một mức.
+
+% =====================================================================
+\section{Logic code}
+
+\begin{enumerate}
+  \item \code{measure(model)} $\to$ (params, flops) qua thop $+$ numel; \code{benchmark\_latency(model)} $\to$ ms/FPS (warm-up $+$ trung bình).
+  \item \code{prune(dense, method, rate)} --- interface thống nhất cho 5 method.
+  \item \code{compare\_methods.py} --- loop Phase 1--2, ghi CSV \code{(model, method, rate, params, flops, latency, mAP)}.
+  \item \code{analyze.py} --- đọc CSV, vẽ đường mAP-vs-\%MACs, nội suy tại grid \{30,50,70\}\%, xuất bảng phân tầng.
+\end{enumerate}
+
+Checklist: cùng dense, cùng finetune budget, cùng test set, đo Params/MACs/latency thật, mỗi method
+dùng allocation tự nhiên (không ép uniform), so ở iso-\%MACs.
+
+% =====================================================================
+\section{So sánh cái gì}
+
+So trên mặt phẳng accuracy vs \%MACs theo Pareto (giống A*):
+\begin{itemize}
+  \item Bảng phân tầng (kiểu SLIMING Table 3): mỗi tầng compression so mAP các method.
+  \item Đường cong mAP-vs-\%MACs: method có đường cao và lệch trái thắng.
+  \item Đột phá của bi-level $=$ đường cong trùm CORING/SLIMING/NORTON ở mọi mức \%MACs.
+\end{itemize}
+
+Bảng đích (per model, mốc tương đối), kèm cột \%Params $+$ latency; NORTON để bảng riêng có latency:
+\begin{center}
+\begin{tabular}{@{}lcccc@{}}
+\hline
+Giảm MACs & bi-level & CORING & SLIMING & NORTON\\
+\hline
+$-30\%$ & mAP & mAP & mAP & mAP (+lat)\\
+$-50\%$ & mAP & mAP & mAP & mAP (+lat)\\
+$-70\%$ & mAP & mAP & mAP & mAP (+lat)\\
+\hline
+\end{tabular}
+\end{center}
+
+Tóm: mỗi method nén trung thành gốc $\to$ sweep rate $\to$ đo \%MACs/\%Params/latency/mAP (finetune
+cùng budget) $\to$ so ở iso-\%MACs theo Pareto. Rate chỉ để rải điểm; trục so là \%MACs đo được.
+
+\end{document}
