@@ -261,10 +261,13 @@ Câu hỏi: có phải trend hiện nay là prune trên các bản YOLO mới nh
 | [YOLOv9](https://arxiv.org/abs/2402.13616) | 02/2024 | **0** | 32 tháng, vẫn chưa có |
 | [YOLOv10](https://arxiv.org/abs/2405.14458) | 05/2024 | **1** | ~22 tháng |
 | [YOLO11](https://docs.ultralytics.com/models/yolo11/) | 09/2024 | **~16** | 3 tháng (yếu) / 7–11 tháng (bài tử tế) |
-| [YOLOv12](https://arxiv.org/abs/2502.12524) | 02/2025 | **3** | ~9 tháng |
-| [YOLOv13](https://arxiv.org/abs/2506.17733) | 06/2025 | **1** | ~2 tháng |
-| [YOLO26](https://docs.ultralytics.com/models/yolo26/) | 01/2026 | **1** | ~4 tháng |
+| [YOLOv12](https://arxiv.org/abs/2502.12524) | 02/2025 | **7** | ~9 tháng |
+| [YOLOv13](https://arxiv.org/abs/2506.17733) | 06/2025 | **4** | ~2 tháng |
+| [YOLO26](https://docs.ultralytics.com/models/yolo26/) | 01/2026 | **2** (1 prune trọng số thật, 1 chỉ bỏ nhánh P5) | ~4 tháng |
 | [YOLO27](https://docs.ultralytics.com/models/yolo27/) | công bố 09/2026, **chưa phát hành weights** | 0 | – |
+
+(Con số v12/v13/26 lấy từ lượt rà soát sâu thứ hai, kỹ hơn lượt đầu — lượt đầu đếm 3/1/1. Kết luận
+không đổi: cộng cả ba bản lại vẫn chỉ ~13 bài, so với hàng trăm bài trên v5/v7/v8.)
 
 **"YOLOv25" không tồn tại.** Tìm arXiv toàn trường cho `"YOLOv25" OR "YOLO25"` ra 0 kết quả.
 Nhầm lẫn đến từ tên sự kiện: **YV25 = YOLO Vision 2025**, hội nghị nơi YOLO26 được giới thiệu.
@@ -277,14 +280,56 @@ lại đúng **5 bài trên toàn thế giới**.
 và YOLOv10 nằm ngoài codebase Ultralytics → gần như bị bỏ qua. YOLOv13 là fork của Ultralytics → bị
 prune chỉ sau 2 tháng.
 
-### Không bản nào từ v9 trở lên có kết quả pruning trên COCO
+### Từ v9 trở lên, chỉ có đúng MỘT bài prune báo cáo trên COCO
 
-Cả 22 bài đều chỉ đánh giá trên dataset nhỏ, thường là riêng tư: mía, lúa, bông, cúc vạn thọ,
-sứ cách điện, đường sắt, cọ dầu, chóp giao thông, cà chua nhà kính, ngô, KITTI/BDD100K, VisDrone,
-ExDark. Vài bài còn train from scratch, không dùng weight COCO.
+**MambaACE-YOLO** ([Applied Sciences 16(15):7845, 08/2026](https://doi.org/10.3390/app16157845)) —
+thiết kế theo dòng YOLOv13, đánh giá trên **COCO 2017 val**, báo cáo **mAP50-95**:
 
-Bài pruning detector duy nhất 2025–2026 có số COCO là
+| Model | AP (mAP50-95) | Params | GFLOPs | TRT FP16 |
+|---|---|---|---|---|
+| YOLOv13-N (baseline) | 41.6 | 2.5M | 6.4 | 1.35 ms |
+| MambaACE-YOLO-N chưa prune (9 path) | 42.5 | 2.6M | 6.4 | 1.19 ms |
+| **MambaACE-YOLO-N đã prune (5 path)** | **42.4** | **2.3M** | **5.8** | **1.02 ms** |
+
+Lưu ý: đây là **prune đường dẫn/cổng (path/gate) của SA-FullPAD**, không phải prune kênh, và mức
+giảm chỉ −11.5% params. Chính tác giả thừa nhận con số 42.5 dùng lịch 600 epoch mà **không có
+control YOLOv13-N cùng 600 epoch**.
+
+Toàn bộ các bài còn lại chỉ đánh giá trên dataset nhỏ, thường là riêng tư: mía, lúa, bông, cúc vạn
+thọ, sứ cách điện, đường sắt, cọ dầu, chóp giao thông, cà chua nhà kính, ngô, cháy rừng, KITTI,
+VisDrone, ExDark. Nhiều bài **chỉ báo mAP50**, không báo mAP50-95.
+
+Bài pruning detector 2025–2026 duy nhất khác có số COCO là
 [arXiv 2602.14040](https://arxiv.org/abs/2602.14040), và nó dùng **YOLOv8**.
+
+### Bằng chứng mạnh nhất: coupling của v12/v13 làm structured pruning gần như vô hiệu
+
+Hai bài tạp chí độc lập năm 2026 prune YOLOv13 một cách trung thực và đều thu được mức giảm gần bằng
+không, kèm lời giải thích thẳng thắn:
+
+- **RDD-YOLO** ([Sci. Rep. 2026](https://doi.org/10.1038/s41598-026-64451-6), YOLOv13n): params
+  −0.9%, GFLOPs −3.3%. Nguyên văn: *"the actual number of pruned layers is only 10, and a total of
+  184 channels are removed"*, vì *"some layers cannot be pruned due to the small number of channels
+  or the failure to satisfy the coupling conditions"*. Bài này chỉ dám cắt lớp MLP expansion trong
+  ABlock của A2C2f và giới hạn ở 50%.
+- **ISA-YOLO** ([Plant Methods 2026](https://doi.org/10.1186/s13007-026-01566-x), nền YOLOv13):
+  params −0.2%, GFLOPs −1.2%. Nguyên văn: *"the coupled architecture leaves limited removable
+  redundancy; in this setting, pruning behaves more like mild regularization than the primary source
+  of acceleration"* — họ quy phần tăng tốc cho FP16 TensorRT chứ không phải pruning.
+- **YOLOv13-Cone-Lite** ([Applied Sciences 15(17):9501](https://doi.org/10.3390/app15179501)) so hai
+  tiêu chí trên YOLOv13s: **BN-γ sparsity 94.2 → 92.7 mAP50**, còn **structural reparameterization
+  94.2 → 93.8**. Tức tiêu chí theo BN hại nhiều hơn hẳn trên kiến trúc có attention.
+- **Water 2026** ([18(16):2029](https://doi.org/10.3390/w18162029)) nói thẳng lý do họ **không** prune
+  YOLO11/YOLO26 mà chỉ scale kiến trúc: *"the C3k2/C2PSA components of these architectures do not
+  adhere to the same pruning rule"*. Bài này còn ghi: *"reductions in parameter count and GFLOPs do
+  not serve as reliable predictors of round-trip latency on the target VPU"*.
+
+Hệ quả: những bài **tuyên bố giảm mạnh trên v12/v13 thực ra không prune phần attention** — hoặc chỉ
+prune nhánh CNN thường do chính họ thêm vào (DELP-YOLOv12, F3-YOLO), hoặc prune cổng/đường dẫn
+(MambaACE), hoặc chỉ đổi width multiplier trong YAML (YOLO-SAT, Aero-YOLO).
+
+**Chưa có công trình nào prune kênh qv/proj của area-attention.** Đây là khoảng trống kỹ thuật rõ
+ràng nhất.
 
 ### Vài kết quả cụ thể (đã đọc được số)
 
@@ -341,6 +386,13 @@ báo cáo COCO. **Dùng YOLOv12 hoặc YOLO26 cho một mục "tổng quát hoá
 dùng làm nền thí nghiệm chính.
 
 Hai đóng góp còn trống và có giá trị cao nhất từ khảo sát này:
-1. **Báo cáo mAP50-95 trên COCO cho model đã prune, với bất kỳ YOLO nào từ v9 trở lên** — chưa ai làm.
-2. **Giải bài toán dependency-graph xuyên qua attention block (C2PSA / area attention) và head
-   NMS-free dual** — đây chính là lý do kỹ thuật khiến cả ngành mắc kẹt ở v8.
+1. **Prune kênh thật xuyên qua attention block (C2PSA của YOLO11, area-attention/A2C2f của YOLOv12)
+   với dependency grouping đúng.** Hai bài YOLOv13 độc lập đã chứng minh bằng số rằng không làm được
+   việc này thì mức giảm chỉ còn 0.2–0.9% params. Đây là lý do kỹ thuật khiến cả ngành mắc kẹt ở v8.
+2. **Báo cáo COCO mAP50-95 cho model YOLO ≥ v9 đã prune kênh.** Mới có đúng một bài báo cáo COCO
+   (MambaACE-YOLO) và nó prune đường dẫn chứ không prune kênh — nên ô này vẫn trống.
+
+Hai rủi ro phải nói rõ trong luận văn nếu đi hướng này:
+- **mAP50 che giấu thiệt hại.** YOLO26-RipeLoc: cắt 30% thì mAP50 chỉ giảm 0.01 điểm nhưng
+  **mAP50-95 giảm 2.00 điểm**, và phần chữ của bài chỉ nói về mAP50. Luôn báo cả hai.
+- **params/GFLOPs không dự đoán được latency thật** trên VPU/edge (Water 2026). Phải đo trực tiếp.
